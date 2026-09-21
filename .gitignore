@@ -2,5 +2,6 @@
 **/dist/
 **/.env
 **/*.log
+.agent-worktrees/
 
 .codex-output/

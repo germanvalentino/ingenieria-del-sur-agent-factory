@@ -1,10 +1,18 @@
 import { Router } from "express";
 import { pool } from "../db.js";
 import { executeCodex } from "../services/codex.service.js";
+import {
+  getWorktreeStatus,
+  prepareTaskWorktree,
+} from "../services/git-worktree.service.js";
 
 const router = Router();
 
-const VALID_ROLES = ["frontend", "backend", "qa"];
+const VALID_ROLES = [
+  "frontend",
+  "backend",
+  "qa",
+];
 
 function createBranchName(role, title) {
   const slug = title
@@ -26,7 +34,11 @@ router.post("/", async (req, res) => {
     assignedRole,
   } = req.body;
 
-  if (!projectId || !title?.trim() || !assignedRole) {
+  if (
+    !projectId ||
+    !title?.trim() ||
+    !assignedRole
+  ) {
     return res.status(400).json({
       status: "error",
       message:
@@ -50,9 +62,18 @@ router.post("/", async (req, res) => {
           description,
           assigned_role,
           status,
-          branch_name
+          branch_name,
+          base_branch
         )
-        VALUES ($1, $2, $3, $4, 'queued', $5)
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          'queued',
+          $5,
+          'main'
+        )
         RETURNING *
       `,
       [
@@ -60,13 +81,19 @@ router.post("/", async (req, res) => {
         title.trim(),
         description.trim(),
         assignedRole,
-        createBranchName(assignedRole, title.trim()),
+        createBranchName(
+          assignedRole,
+          title.trim()
+        ),
       ]
     );
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error("Error creando tarea:", error);
+    console.error(
+      "Error creando tarea:",
+      error
+    );
 
     res.status(500).json({
       status: "error",
@@ -77,6 +104,7 @@ router.post("/", async (req, res) => {
 
 router.post("/:id/run", async (req, res) => {
   let agentId;
+  let worktree;
 
   try {
     const taskResult = await pool.query(
@@ -87,7 +115,8 @@ router.post("/:id/run", async (req, res) => {
           p.frontend_path,
           p.backend_path
         FROM tasks t
-        INNER JOIN projects p ON p.id = t.project_id
+        INNER JOIN projects p
+          ON p.id = t.project_id
         WHERE t.id = $1
       `,
       [req.params.id]
@@ -105,14 +134,23 @@ router.post("/:id/run", async (req, res) => {
     if (task.status !== "queued") {
       return res.status(409).json({
         status: "error",
-        message: `La tarea está en estado ${task.status}`,
+        message:
+          `La tarea está en estado ${task.status}`,
       });
     }
 
-    const workingDirectory =
+    const targetDirectory =
       task.assigned_role === "frontend"
         ? task.frontend_path
         : task.backend_path;
+
+    if (!targetDirectory) {
+      return res.status(400).json({
+        status: "error",
+        message:
+          "El proyecto no tiene una ruta configurada para el agente",
+      });
+    }
 
     const agentResult = await pool.query(
       `
@@ -130,20 +168,36 @@ router.post("/:id/run", async (req, res) => {
     if (!agent) {
       return res.status(400).json({
         status: "error",
-        message: "No existe un agente activo para esta tarea",
+        message:
+          "No existe un agente activo para esta tarea",
       });
     }
 
     agentId = agent.id;
 
+    /*
+     * El worktree se prepara antes de ejecutar
+     * Codex. La carpeta principal no se modifica.
+     */
+    worktree = await prepareTaskWorktree({
+      taskId: task.id,
+      targetDirectory,
+      branchName: task.branch_name,
+      baseBranch:
+        task.base_branch || "main",
+    });
+
     await pool.query(
       `
         UPDATE tasks
         SET status = 'running',
+            worktree_path = $2,
+            execution_started_at = NOW(),
+            execution_finished_at = NULL,
             updated_at = NOW()
         WHERE id = $1
       `,
-      [task.id]
+      [task.id, worktree.worktreeRoot]
     );
 
     await pool.query(
@@ -169,35 +223,67 @@ TAREA:
 ${task.title}
 
 DESCRIPCIÓN Y CRITERIOS:
-${task.description || "No se proporcionó descripción adicional."}
+${
+  task.description ||
+  "No se proporcionó descripción adicional."
+}
+
+CONTEXTO GIT:
+- Rama asignada: ${task.branch_name}
+- Rama base: ${task.base_branch || "main"}
+- Estás trabajando dentro de un git worktree aislado.
+- La carpeta principal del usuario no debe modificarse.
 
 REGLAS OBLIGATORIAS:
-- Trabajá únicamente dentro del directorio asignado.
+- Trabajá solamente dentro del directorio asignado.
+- No cambies de rama.
+- No crees otro worktree.
 - No hagas git commit.
 - No hagas git push.
+- No hagas merge.
 - No despliegues.
 - No modifiques bases de datos de producción.
 - No leas ni muestres archivos .env.
 - Conservá el stack y la estructura existente.
-- Ejecutá los tests o build que correspondan.
-- Al terminar, informá archivos modificados, validaciones realizadas y riesgos pendientes.
+- Ejecutá los tests o build correspondientes.
+- Al finalizar, informá archivos modificados, validaciones realizadas y riesgos pendientes.
 `;
 
     const result = await executeCodex({
-      workingDirectory,
+      workingDirectory:
+        worktree.agentWorkingDirectory,
       prompt,
     });
+
+    const gitStatus =
+      await getWorktreeStatus(
+        worktree.worktreeRoot
+      );
+
+    const summary = [
+      result.output,
+      "",
+      "ESTADO DEL WORKTREE:",
+      gitStatus || "Sin cambios pendientes.",
+      "",
+      `Rama: ${task.branch_name}`,
+      `Worktree: ${worktree.worktreeRoot}`,
+    ].join("\n");
 
     const updatedTask = await pool.query(
       `
         UPDATE tasks
         SET status = 'review',
             result_summary = $2,
+            execution_finished_at = NOW(),
             updated_at = NOW()
         WHERE id = $1
         RETURNING *
       `,
-      [task.id, result.output.slice(-15000)]
+      [
+        task.id,
+        summary.slice(-15000),
+      ]
     );
 
     await pool.query(
@@ -212,17 +298,24 @@ REGLAS OBLIGATORIAS:
 
     res.json(updatedTask.rows[0]);
   } catch (error) {
-    console.error("Error ejecutando Codex:", error);
+    console.error(
+      "Error ejecutando Codex:",
+      error
+    );
 
     await pool.query(
       `
         UPDATE tasks
         SET status = 'failed',
             result_summary = $2,
+            execution_finished_at = NOW(),
             updated_at = NOW()
         WHERE id = $1
       `,
-      [req.params.id, error.message.slice(-15000)]
+      [
+        req.params.id,
+        error.message.slice(-15000),
+      ]
     );
 
     if (agentId) {
@@ -244,37 +337,44 @@ REGLAS OBLIGATORIAS:
   }
 });
 
-router.post("/:id/approve", async (req, res) => {
-  try {
-    const result = await pool.query(
-      `
-        UPDATE tasks
-        SET status = 'passed',
-            updated_at = NOW()
-        WHERE id = $1
-          AND status = 'review'
-        RETURNING *
-      `,
-      [req.params.id]
-    );
+router.post(
+  "/:id/approve",
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `
+          UPDATE tasks
+          SET status = 'passed',
+              updated_at = NOW()
+          WHERE id = $1
+            AND status = 'review'
+          RETURNING *
+        `,
+        [req.params.id]
+      );
 
-    if (result.rowCount === 0) {
-      return res.status(409).json({
+      if (result.rowCount === 0) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no existe o no está pendiente de revisión",
+        });
+      }
+
+      res.json(result.rows[0]);
+    } catch (error) {
+      console.error(
+        "Error aprobando tarea:",
+        error
+      );
+
+      res.status(500).json({
         status: "error",
         message:
-          "La tarea no existe o no está pendiente de revisión",
+          "No se pudo aprobar la tarea",
       });
     }
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error("Error aprobando tarea:", error);
-
-    res.status(500).json({
-      status: "error",
-      message: "No se pudo aprobar la tarea",
-    });
   }
-});
+);
 
 export default router;
