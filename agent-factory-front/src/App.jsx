@@ -32,6 +32,10 @@ const statusClasses = {
   failed: "bg-red-500/15 text-red-300",
 };
 
+function pluralizeCount(count, singular, plural) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function MetricCard({
   title,
   value,
@@ -325,10 +329,18 @@ async function runQa(taskId) {
           </div>
 
           <p className="mt-1 text-sm text-slate-500">
-            {dashboard.agents.length}{" "}
-            {dashboard.agents.length === 1
-              ? "agente configurado"
-              : "agentes configurados"}
+            {pluralizeCount(
+              dashboard.agents.length,
+              "agente",
+              "agentes"
+            )}{" "}
+            y{" "}
+            {pluralizeCount(
+              dashboard.projects.length,
+              "proyecto",
+              "proyectos"
+            )}{" "}
+            configurados
           </p>
 
           <h2 className="mt-2 text-3xl font-bold text-white">
