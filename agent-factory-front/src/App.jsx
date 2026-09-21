@@ -282,6 +282,13 @@ function App() {
             </span>
           </div>
 
+          <p className="mt-1 text-sm text-slate-500">
+            {dashboard.agents.length}{" "}
+            {dashboard.agents.length === 1
+              ? "agente configurado"
+              : "agentes configurados"}
+          </p>
+
           <h2 className="mt-2 text-3xl font-bold text-white">
             Construimos software con agentes
           </h2>
