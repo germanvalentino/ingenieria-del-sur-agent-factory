@@ -30,9 +30,18 @@ async function executeNpmScript({
   workingDirectory,
 }) {
   try {
+    const commandProcessor =
+      process.env.ComSpec ||
+      "C:\\Windows\\System32\\cmd.exe";
+
     const result = await execFileAsync(
-      "npm.cmd",
-      ["run", script],
+      commandProcessor,
+      [
+        "/d",
+        "/s",
+        "/c",
+        `npm.cmd run ${script}`,
+      ],
       {
         cwd: workingDirectory,
         windowsHide: true,
