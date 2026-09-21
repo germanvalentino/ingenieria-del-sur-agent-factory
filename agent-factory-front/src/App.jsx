@@ -610,7 +610,7 @@ function App() {
       </main>
 
       <footer className="mt-10 border-t border-white/10 py-6 text-center text-sm text-slate-500">
-        Ingeniería del Sur · Agent Software
+        Ingeniería del Sur · MVP 0.1 · Agent Software
         Factory
       </footer>
     </div>
