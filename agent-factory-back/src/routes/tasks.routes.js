@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "../db.js";
 import { executeCodex } from "../services/codex.service.js";
+import { runQaValidation } from "../services/qa.service.js";
 
 import {
   finalizeTaskWorktree,
@@ -190,15 +191,21 @@ router.post("/:id/run", async (req, res) => {
 
     await pool.query(
       `
-        UPDATE tasks
-        SET status = 'running',
-            worktree_path = $2,
-            execution_started_at = NOW(),
-            execution_finished_at = NULL,
-            updated_at = NOW()
-        WHERE id = $1
+       UPDATE tasks
+SET status = 'running',
+    worktree_path = $2,
+    agent_working_path = $3,
+    qa_status = 'pending',
+    execution_started_at = NOW(),
+    execution_finished_at = NULL,
+    updated_at = NOW()
+WHERE id = $1
       `,
-      [task.id, worktree.worktreeRoot]
+      [
+  task.id,
+  worktree.worktreeRoot,
+  worktree.agentWorkingDirectory,
+]
     );
 
     await pool.query(
@@ -339,6 +346,175 @@ REGLAS OBLIGATORIAS:
 });
 
 router.post(
+  "/:id/qa",
+  async (req, res) => {
+    let qaAgentId;
+
+    try {
+      const taskResult = await pool.query(
+        `
+          SELECT *
+          FROM tasks
+          WHERE id = $1
+        `,
+        [req.params.id]
+      );
+
+      const task = taskResult.rows[0];
+
+      if (!task) {
+        return res.status(404).json({
+          status: "error",
+          message: "Tarea no encontrada",
+        });
+      }
+
+      if (task.status !== "review") {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea debe estar en revisión para ejecutar QA",
+        });
+      }
+
+      if (!task.agent_working_path) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no tiene un directorio de trabajo",
+        });
+      }
+
+      if (task.qa_status === "running") {
+        return res.status(409).json({
+          status: "error",
+          message: "QA ya está ejecutándose",
+        });
+      }
+
+      const agentResult = await pool.query(
+        `
+          SELECT *
+          FROM agents
+          WHERE role = 'qa'
+            AND active = TRUE
+          LIMIT 1
+        `
+      );
+
+      const qaAgent = agentResult.rows[0];
+
+      if (!qaAgent) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "No existe un QA Agent activo",
+        });
+      }
+
+      qaAgentId = qaAgent.id;
+
+      await pool.query(
+        `
+          UPDATE tasks
+          SET qa_status = 'running',
+              qa_started_at = NOW(),
+              qa_finished_at = NULL,
+              qa_summary = NULL,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [task.id]
+      );
+
+      await pool.query(
+        `
+          UPDATE agents
+          SET status = 'working',
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [qaAgent.id]
+      );
+
+      const qaResult =
+        await runQaValidation({
+          workingDirectory:
+            task.agent_working_path,
+        });
+
+      const updatedTask =
+        await pool.query(
+          `
+            UPDATE tasks
+            SET qa_status = $2,
+                qa_summary = $3,
+                qa_finished_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+          `,
+          [
+            task.id,
+            qaResult.status,
+            qaResult.summary.slice(-15000),
+          ]
+        );
+
+      await pool.query(
+        `
+          UPDATE agents
+          SET status = 'idle',
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [qaAgent.id]
+      );
+
+      res.json(updatedTask.rows[0]);
+    } catch (error) {
+      console.error(
+        "Error ejecutando QA:",
+        error
+      );
+
+      await pool.query(
+        `
+          UPDATE tasks
+          SET qa_status = 'failed',
+              qa_summary = $2,
+              qa_finished_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          req.params.id,
+          error.message.slice(-15000),
+        ]
+      );
+
+      if (qaAgentId) {
+        await pool.query(
+          `
+            UPDATE agents
+            SET status = 'idle',
+                updated_at = NOW()
+            WHERE id = $1
+          `,
+          [qaAgentId]
+        );
+      }
+
+      res.status(500).json({
+        status: "error",
+        message: error.message,
+      });
+    }
+  }
+);
+
+
+router.post(
   "/:id/approve",
   async (req, res) => {
     try {
@@ -367,6 +543,14 @@ router.post(
             `La tarea está en estado ${task.status}`,
         });
       }
+
+      if (task.qa_status !== "passed") {
+  return res.status(409).json({
+    status: "error",
+    message:
+      "La tarea necesita QA aprobado antes de integrarse a main",
+  });
+}
 
       if (!task.worktree_path) {
         return res.status(409).json({
