@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Play,
   RefreshCw,
+  ShieldCheck,
 } from "lucide-react";
 
 const API_URL =
@@ -73,6 +74,7 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [runningTaskId, setRunningTaskId] =
     useState(null);
+  const [qaTaskId, setQaTaskId] = useState(null);
   const [error, setError] = useState("");
 
   async function loadDashboard() {
@@ -209,7 +211,47 @@ function App() {
       setRunningTaskId(null);
     }
   }
+async function runQa(taskId) {
+  try {
+    setQaTaskId(taskId);
+    setError("");
 
+    setDashboard((current) => ({
+      ...current,
+      tasks: current.tasks.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              qa_status: "running",
+            }
+          : task
+      ),
+    }));
+
+    const response = await fetch(
+      `${API_URL}/tasks/${taskId}/qa`,
+      {
+        method: "POST",
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message ||
+          "No se pudo ejecutar QA"
+      );
+    }
+
+    await loadDashboard();
+  } catch (err) {
+    setError(err.message);
+    await loadDashboard();
+  } finally {
+    setQaTaskId(null);
+  }
+}
   async function approveTask(taskId) {
   try {
     setError("");
@@ -517,6 +559,24 @@ function App() {
                               </pre>
                             </details>
                           )}
+                          {task.qa_summary && (
+                            <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                              <summary
+                                className={`cursor-pointer text-xs font-medium ${
+                                  task.qa_status === "passed"
+                                    ? "text-emerald-300"
+                                    : "text-red-300"
+                                }`}
+                              >
+                                Ver resultado QA ·{" "}
+                                {task.qa_status}
+                              </summary>
+
+                              <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap text-xs text-slate-400">
+                                {task.qa_summary}
+                              </pre>
+                            </details>
+                          )}
                         </div>
 
                         <div className="flex shrink-0 flex-col items-end gap-3">
@@ -541,16 +601,45 @@ function App() {
                             </button>
                           )}
 
-                          {task.status === "review" && (
-                              <button
-                                type="button"
-                                onClick={() => approveTask(task.id)}
-                                className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
-                              >
-                                <CheckCircle2 size={14} />
-                                Aprobar
-                              </button>
-                            )}
+                    {task.status === "review" &&
+                      task.qa_status !== "running" &&
+                      task.qa_status !== "passed" && (
+                        <button
+                          type="button"
+                          onClick={() => runQa(task.id)}
+                          disabled={qaTaskId !== null}
+                          className="flex items-center gap-2 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
+                        >
+                          <ShieldCheck size={14} />
+
+                          {task.qa_status === "failed"
+                            ? "Reintentar QA"
+                            : "Ejecutar QA"}
+                        </button>
+                      )}
+
+                    {task.status === "review" &&
+                      task.qa_status === "running" && (
+                        <span className="flex items-center gap-2 text-xs text-violet-300">
+                          <LoaderCircle
+                            size={15}
+                            className="animate-spin"
+                          />
+                          QA ejecutando
+                        </span>
+                      )}
+
+                    {task.status === "review" &&
+                      task.qa_status === "passed" && (
+                        <button
+                          type="button"
+                          onClick={() => approveTask(task.id)}
+                          className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+                        >
+                          <CheckCircle2 size={14} />
+                          Aprobar
+                        </button>
+                      )}
 
                           {task.status ===
                             "running" && (
