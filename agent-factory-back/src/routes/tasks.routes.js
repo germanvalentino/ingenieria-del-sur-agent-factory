@@ -244,4 +244,37 @@ REGLAS OBLIGATORIAS:
   }
 });
 
+router.post("/:id/approve", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        UPDATE tasks
+        SET status = 'passed',
+            updated_at = NOW()
+        WHERE id = $1
+          AND status = 'review'
+        RETURNING *
+      `,
+      [req.params.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(409).json({
+        status: "error",
+        message:
+          "La tarea no existe o no está pendiente de revisión",
+      });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Error aprobando tarea:", error);
+
+    res.status(500).json({
+      status: "error",
+      message: "No se pudo aprobar la tarea",
+    });
+  }
+});
+
 export default router;

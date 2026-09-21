@@ -210,6 +210,31 @@ function App() {
     }
   }
 
+  async function approveTask(taskId) {
+  try {
+    setError("");
+
+    const response = await fetch(
+      `${API_URL}/tasks/${taskId}/approve`,
+      {
+        method: "POST",
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message || "No se pudo aprobar la tarea"
+      );
+    }
+
+    await loadDashboard();
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200">
       <header className="border-b border-white/10 bg-slate-950/80">
@@ -508,6 +533,17 @@ function App() {
                               Ejecutar
                             </button>
                           )}
+
+                          {task.status === "review" && (
+                              <button
+                                type="button"
+                                onClick={() => approveTask(task.id)}
+                                className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+                              >
+                                <CheckCircle2 size={14} />
+                                Aprobar
+                              </button>
+                            )}
 
                           {task.status ===
                             "running" && (
