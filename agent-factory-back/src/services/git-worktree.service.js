@@ -173,3 +173,136 @@ export async function getWorktreeStatus(
 
   return result.stdout;
 }
+
+export async function finalizeTaskWorktree({
+  worktreeRoot,
+  branchName,
+  baseBranch,
+  commitMessage,
+}) {
+  const safeWorktree =
+    validateAllowedPath(worktreeRoot);
+
+  validateBranchName(branchName);
+  validateBranchName(baseBranch);
+
+  const commonDirectoryResult = await runGit(
+    [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ],
+    safeWorktree
+  );
+
+  const repositoryRoot = validateAllowedPath(
+    path.dirname(commonDirectoryResult.stdout)
+  );
+
+  const worktreeBranchResult = await runGit(
+    ["branch", "--show-current"],
+    safeWorktree
+  );
+
+  if (
+    worktreeBranchResult.stdout !== branchName
+  ) {
+    throw new Error(
+      `El worktree está en la rama ${worktreeBranchResult.stdout}, no en ${branchName}`
+    );
+  }
+
+  const statusResult = await runGit(
+    ["status", "--porcelain"],
+    safeWorktree
+  );
+
+  if (!statusResult.stdout) {
+    throw new Error(
+      "El agente no dejó cambios para aprobar"
+    );
+  }
+
+  const mainStatusResult = await runGit(
+    ["status", "--porcelain"],
+    repositoryRoot
+  );
+
+  if (mainStatusResult.stdout) {
+    throw new Error(
+      "El repositorio principal tiene cambios sin guardar"
+    );
+  }
+
+  const mainBranchResult = await runGit(
+    ["branch", "--show-current"],
+    repositoryRoot
+  );
+
+  if (mainBranchResult.stdout !== baseBranch) {
+    throw new Error(
+      `El repositorio principal debe estar en ${baseBranch}, pero está en ${mainBranchResult.stdout}`
+    );
+  }
+
+  await runGit(
+    ["add", "--all"],
+    safeWorktree
+  );
+
+  await runGit(
+    ["commit", "-m", commitMessage],
+    safeWorktree
+  );
+
+  const commitResult = await runGit(
+    ["rev-parse", "HEAD"],
+    safeWorktree
+  );
+
+  await runGit(
+    ["merge", "--ff-only", branchName],
+    repositoryRoot
+  );
+
+  const warnings = [];
+
+  try {
+    await runGit(
+      ["worktree", "remove", worktreeRoot],
+      repositoryRoot
+    );
+  } catch (error) {
+    warnings.push(
+      `No se pudo eliminar completamente el worktree: ${error.message}`
+    );
+
+    try {
+      await runGit(
+        ["worktree", "prune"],
+        repositoryRoot
+      );
+    } catch (pruneError) {
+      warnings.push(
+        `No se pudo depurar el registro: ${pruneError.message}`
+      );
+    }
+  }
+
+  try {
+    await runGit(
+      ["branch", "-d", branchName],
+      repositoryRoot
+    );
+  } catch (error) {
+    warnings.push(
+      `No se pudo eliminar la rama local: ${error.message}`
+    );
+  }
+
+  return {
+    commitHash: commitResult.stdout,
+    repositoryRoot,
+    warnings,
+  };
+}

@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { pool } from "../db.js";
 import { executeCodex } from "../services/codex.service.js";
+
 import {
+  finalizeTaskWorktree,
   getWorktreeStatus,
   prepareTaskWorktree,
 } from "../services/git-worktree.service.js";
-
 const router = Router();
 
 const VALID_ROLES = [
@@ -341,27 +342,86 @@ router.post(
   "/:id/approve",
   async (req, res) => {
     try {
-      const result = await pool.query(
+      const taskResult = await pool.query(
         `
-          UPDATE tasks
-          SET status = 'passed',
-              updated_at = NOW()
+          SELECT *
+          FROM tasks
           WHERE id = $1
-            AND status = 'review'
-          RETURNING *
         `,
         [req.params.id]
       );
 
-      if (result.rowCount === 0) {
-        return res.status(409).json({
+      const task = taskResult.rows[0];
+
+      if (!task) {
+        return res.status(404).json({
           status: "error",
-          message:
-            "La tarea no existe o no está pendiente de revisión",
+          message: "Tarea no encontrada",
         });
       }
 
-      res.json(result.rows[0]);
+      if (task.status !== "review") {
+        return res.status(409).json({
+          status: "error",
+          message:
+            `La tarea está en estado ${task.status}`,
+        });
+      }
+
+      if (!task.worktree_path) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no tiene un worktree asociado",
+        });
+      }
+
+      const result =
+        await finalizeTaskWorktree({
+          worktreeRoot:
+            task.worktree_path,
+          branchName:
+            task.branch_name,
+          baseBranch:
+            task.base_branch || "main",
+          commitMessage:
+            `Task ${task.id}: ${task.title}`,
+        });
+
+      const warning =
+        result.warnings.length > 0
+          ? result.warnings.join("\n")
+          : null;
+
+      const updatedTask =
+        await pool.query(
+          `
+            UPDATE tasks
+            SET status = 'passed',
+                commit_hash = $2,
+                approved_at = NOW(),
+                cleanup_warning = $3,
+                result_summary =
+                  COALESCE(
+                    result_summary,
+                    ''
+                  )
+                  || $4,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+          `,
+          [
+            task.id,
+            result.commitHash,
+            warning,
+            `\n\nAPROBACIÓN HUMANA:\nCommit ${result.commitHash} integrado a ${task.base_branch || "main"}.`,
+          ]
+        );
+
+      res.json(
+        updatedTask.rows[0]
+      );
     } catch (error) {
       console.error(
         "Error aprobando tarea:",
@@ -370,8 +430,7 @@ router.post(
 
       res.status(500).json({
         status: "error",
-        message:
-          "No se pudo aprobar la tarea",
+        message: error.message,
       });
     }
   }
