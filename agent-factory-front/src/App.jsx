@@ -162,6 +162,41 @@ function getInputTokens(execution) {
   ]);
 }
 
+function getCachedInputTokens(execution) {
+  return pickValue(execution, [
+    "cached_input_tokens",
+    "cachedInputTokens",
+  ]);
+}
+
+function getNonCachedInputTokens(execution) {
+  const inputTokens = getInputTokens(execution);
+  const cachedInputTokens = getCachedInputTokens(execution);
+
+  if (
+    inputTokens === null ||
+    inputTokens === undefined ||
+    inputTokens === "" ||
+    cachedInputTokens === null ||
+    cachedInputTokens === undefined ||
+    cachedInputTokens === ""
+  ) {
+    return null;
+  }
+
+  const inputTokenCount = Number(inputTokens);
+  const cachedInputTokenCount = Number(cachedInputTokens);
+
+  if (
+    !Number.isFinite(inputTokenCount) ||
+    !Number.isFinite(cachedInputTokenCount)
+  ) {
+    return null;
+  }
+
+  return Math.max(inputTokenCount - cachedInputTokenCount, 0);
+}
+
 function getOutputTokens(execution) {
   return pickValue(execution, [
     "output_tokens",
@@ -244,6 +279,12 @@ function normalizeTaskHistory(data) {
       inputTokens:
         pickValue(summary, ["input_tokens", "inputTokens"]) ??
         sumKnownValues(executions.map(getInputTokens)),
+      cachedInputTokens: pickValue(summary, [
+        "totalCachedInputTokens",
+      ]),
+      nonCachedInputTokens: pickValue(summary, [
+        "totalNonCachedInputTokens",
+      ]),
       outputTokens:
         pickValue(summary, ["output_tokens", "outputTokens"]) ??
         sumKnownValues(executions.map(getOutputTokens)),
@@ -1140,7 +1181,7 @@ async function correctTask(taskId) {
                                     !historyState.loading &&
                                     !historyState.error && (
                                       <>
-                                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
                                           <div className="rounded-lg border border-white/10 bg-white/5 p-3">
                                             <p className="text-[11px] uppercase text-slate-500">
                                               Ejecuciones
@@ -1161,6 +1202,30 @@ async function correctTask(taskId) {
                                               {formatNumber(
                                                 history.summary
                                                   .inputTokens,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Tokens caché
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatNumber(
+                                                history.summary
+                                                  .cachedInputTokens,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Entrada no cacheada
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatNumber(
+                                                history.summary
+                                                  .nonCachedInputTokens,
                                               )}
                                             </strong>
                                           </div>
@@ -1331,7 +1396,7 @@ async function correctTask(taskId) {
                                                       </p>
 
                                                       <p>
-                                                        Entrada:{" "}
+                                                        Tokens entrada:{" "}
                                                         <span className="text-slate-200">
                                                           {formatNumber(
                                                             getInputTokens(
@@ -1342,7 +1407,29 @@ async function correctTask(taskId) {
                                                       </p>
 
                                                       <p>
-                                                        Salida:{" "}
+                                                        Tokens caché:{" "}
+                                                        <span className="text-slate-200">
+                                                          {formatNumber(
+                                                            getCachedInputTokens(
+                                                              execution,
+                                                            ),
+                                                          )}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Entrada no cacheada:{" "}
+                                                        <span className="text-slate-200">
+                                                          {formatNumber(
+                                                            getNonCachedInputTokens(
+                                                              execution,
+                                                            ),
+                                                          )}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Tokens salida:{" "}
                                                         <span className="text-slate-200">
                                                           {formatNumber(
                                                             getOutputTokens(
@@ -1353,7 +1440,7 @@ async function correctTask(taskId) {
                                                       </p>
 
                                                       <p>
-                                                        Total:{" "}
+                                                        Tokens totales:{" "}
                                                         <span className="text-slate-200">
                                                           {formatNumber(
                                                             getDisplayTotalTokens(
