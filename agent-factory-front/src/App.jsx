@@ -97,9 +97,12 @@ function createDashboardStore() {
         error: "",
       }));
 
-      const response = await fetch(
-        `${API_URL}/dashboard`
-      );
+    const response = await fetch(
+      `${API_URL}/dashboard`,
+      {
+        cache: "no-store",
+      }
+    );
 
       if (!response.ok) {
         throw new Error(
@@ -479,6 +482,18 @@ async function correctTask(taskId) {
       );
     }
 
+    setDashboard((current) => ({
+      ...current,
+      tasks: current.tasks.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              ...data,
+              status: "passed",
+            }
+          : task
+      ),
+    }));
     await loadDashboard();
   } catch (err) {
     setError(getErrorMessage(err));
