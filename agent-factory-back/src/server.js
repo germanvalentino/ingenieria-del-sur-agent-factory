@@ -4,6 +4,7 @@ import cors from "cors";
 import { pool } from "./db.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import tasksRoutes from "./routes/tasks.routes.js";
+import { recoverInterruptedTasks } from "./services/recovery.service.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -44,6 +45,42 @@ app.get("/api/db-health", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Agent Factory API ejecutándose en http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    const recovery =
+      await recoverInterruptedTasks();
+
+    if (
+      recovery.recoveredTasks.length > 0
+    ) {
+      console.log(
+        "Tareas interrumpidas recuperadas:",
+        recovery.recoveredTasks
+      );
+    }
+
+    if (
+      recovery.recoveredAgents.length > 0
+    ) {
+      console.log(
+        "Agentes restablecidos:",
+        recovery.recoveredAgents
+      );
+    }
+
+    app.listen(PORT, () => {
+      console.log(
+        `Agent Factory API ejecutándose en http://localhost:${PORT}`
+      );
+    });
+  } catch (error) {
+    console.error(
+      "No se pudo iniciar Agent Factory:",
+      error
+    );
+
+    process.exit(1);
+  }
+}
+
+startServer();
