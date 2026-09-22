@@ -13,6 +13,7 @@ import {
   MessageSquareWarning,
   Wrench,
 } from "lucide-react";
+import ProjectManager from "./components/ProjectManager";
 
 const API_URL =
   import.meta.env.VITE_API_URL ||
@@ -1012,6 +1013,7 @@ async function correctTask(taskId) {
             </section>
           </>
         )}
+        <ProjectManager onProjectsChanged={loadDashboard} />
       </main>
 
       <footer className="mt-10 border-t border-white/10 py-6 text-center text-sm text-slate-500">
