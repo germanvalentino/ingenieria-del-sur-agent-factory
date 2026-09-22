@@ -5,6 +5,7 @@ import { pool } from "./db.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import tasksRoutes from "./routes/tasks.routes.js";
 import { recoverInterruptedTasks } from "./services/recovery.service.js";
+import projectsRoutes from "./routes/projects.routes.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -14,6 +15,7 @@ app.use(express.json());
 
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/tasks", tasksRoutes);
+app.use("/api/projects", projectsRoutes);
 
 app.get("/api/health", (req, res) => {
   res.json({
