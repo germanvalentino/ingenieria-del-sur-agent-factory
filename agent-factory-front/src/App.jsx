@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   CirclePlus,
   Clock3,
+  History,
   LayoutDashboard,
   ListTodo,
   LoaderCircle,
@@ -54,6 +55,211 @@ const statusClasses = {
   passed: "bg-emerald-500/15 text-emerald-300",
   failed: "bg-red-500/15 text-red-300",
 };
+
+const numberFormatter = new Intl.NumberFormat("es-AR");
+
+const executionStatusClasses = {
+  completed: "bg-emerald-500/15 text-emerald-300",
+  passed: "bg-emerald-500/15 text-emerald-300",
+  success: "bg-emerald-500/15 text-emerald-300",
+  failed: "bg-red-500/15 text-red-300",
+  error: "bg-red-500/15 text-red-300",
+  running: "bg-sky-500/15 text-sky-300",
+  queued: "bg-amber-500/15 text-amber-300",
+};
+
+function pickValue(record, keys) {
+  if (!record) {
+    return null;
+  }
+
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null) {
+      return record[key];
+    }
+  }
+
+  return null;
+}
+
+function formatNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return "Sin datos";
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue)) {
+    return String(value);
+  }
+
+  return numberFormatter.format(numberValue);
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "Sin datos";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString("es-AR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
+function formatDuration(milliseconds) {
+  if (
+    milliseconds === null ||
+    milliseconds === undefined ||
+    milliseconds === ""
+  ) {
+    return "Sin datos";
+  }
+
+  const duration = Number(milliseconds);
+
+  if (!Number.isFinite(duration)) {
+    return String(milliseconds);
+  }
+
+  if (duration < 1000) {
+    return `${numberFormatter.format(duration)} ms`;
+  }
+
+  const totalSeconds = Math.round(duration / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+
+  if (hours > 0) {
+    parts.push(`${hours} h`);
+  }
+
+  if (minutes > 0) {
+    parts.push(`${minutes} min`);
+  }
+
+  if (seconds > 0 || parts.length === 0) {
+    parts.push(`${seconds} s`);
+  }
+
+  return parts.join(" ");
+}
+
+function getInputTokens(execution) {
+  return pickValue(execution, [
+    "input_tokens",
+    "inputTokens",
+    "prompt_tokens",
+    "promptTokens",
+  ]);
+}
+
+function getOutputTokens(execution) {
+  return pickValue(execution, [
+    "output_tokens",
+    "outputTokens",
+    "completion_tokens",
+    "completionTokens",
+  ]);
+}
+
+function getTotalTokens(execution) {
+  return pickValue(execution, [
+    "total_tokens",
+    "totalTokens",
+    "tokens_total",
+    "tokensTotal",
+  ]);
+}
+
+function getDisplayTotalTokens(execution) {
+  return getTotalTokens(execution);
+}
+
+function getDurationMs(execution) {
+  const milliseconds = pickValue(execution, [
+    "duration_ms",
+    "durationMs",
+    "elapsed_ms",
+    "elapsedMs",
+  ]);
+
+  if (milliseconds !== null) {
+    return milliseconds;
+  }
+
+  const seconds = pickValue(execution, [
+    "duration_seconds",
+    "durationSeconds",
+    "elapsed_seconds",
+    "elapsedSeconds",
+  ]);
+
+  if (seconds !== null && Number.isFinite(Number(seconds))) {
+    return Number(seconds) * 1000;
+  }
+
+  return pickValue(execution, ["duration", "elapsed"]);
+}
+
+function sumKnownValues(values) {
+  const numbers = values
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .map(Number)
+    .filter(Number.isFinite);
+
+  if (numbers.length === 0) {
+    return null;
+  }
+
+  return numbers.reduce((total, value) => total + value, 0);
+}
+
+function normalizeTaskHistory(data) {
+  const executions = Array.isArray(data)
+    ? data
+    : data?.executions || data?.items || data?.history || [];
+  const summary = data?.summary || data?.totals || {};
+
+  return {
+    executions,
+    summary: {
+      count:
+        pickValue(summary, [
+          "execution_count",
+          "executionCount",
+          "executions_count",
+          "executionsCount",
+          "count",
+          "total",
+        ]) ?? executions.length,
+      inputTokens:
+        pickValue(summary, ["input_tokens", "inputTokens"]) ??
+        sumKnownValues(executions.map(getInputTokens)),
+      outputTokens:
+        pickValue(summary, ["output_tokens", "outputTokens"]) ??
+        sumKnownValues(executions.map(getOutputTokens)),
+      totalTokens:
+        pickValue(summary, ["total_tokens", "totalTokens"]) ??
+        sumKnownValues(executions.map(getDisplayTotalTokens)),
+      durationMs:
+        pickValue(summary, [
+          "duration_ms",
+          "durationMs",
+          "total_duration_ms",
+          "totalDurationMs",
+        ]) ?? sumKnownValues(executions.map(getDurationMs)),
+    },
+  };
+}
 
 function pluralizeCount(count, singular, plural) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -195,6 +401,9 @@ function App() {
   correctionTaskId,
   setCorrectionTaskId,
 ] = useState(null);
+  const [openHistoryTaskId, setOpenHistoryTaskId] =
+    useState(null);
+  const [taskHistories, setTaskHistories] = useState({});
   const {
     dashboard,
     loading,
@@ -211,6 +420,61 @@ function App() {
   const setError = (message) => {
     dashboardStore.setError(message);
   };
+
+  async function toggleTaskHistory(taskId) {
+    const shouldOpen = openHistoryTaskId !== taskId;
+
+    setOpenHistoryTaskId(shouldOpen ? taskId : null);
+
+    if (!shouldOpen || taskHistories[taskId]?.data) {
+      return;
+    }
+
+    try {
+      setTaskHistories((current) => ({
+        ...current,
+        [taskId]: {
+          loading: true,
+          error: "",
+          data: null,
+        },
+      }));
+
+      const response = await fetch(
+        `${API_URL}/tasks/${taskId}/executions`,
+        {
+          cache: "no-store",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            "No se pudo cargar el historial"
+        );
+      }
+
+      setTaskHistories((current) => ({
+        ...current,
+        [taskId]: {
+          loading: false,
+          error: "",
+          data: normalizeTaskHistory(data),
+        },
+      }));
+    } catch (err) {
+      setTaskHistories((current) => ({
+        ...current,
+        [taskId]: {
+          loading: false,
+          error: getErrorMessage(err),
+          data: null,
+        },
+      }));
+    }
+  }
 
   function handleChange(event) {
     const { name, value } = event.target;
@@ -838,12 +1102,303 @@ async function correctTask(taskId) {
                               </p>
                             </div>
                           )}
+
+                          {openHistoryTaskId === task.id &&
+                            (() => {
+                              const historyState =
+                                taskHistories[task.id];
+                              const history =
+                                historyState?.data;
+
+                              return (
+                                <div className="mt-4 rounded-lg border border-sky-500/20 bg-slate-950/80 p-4">
+                                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
+                                    <History
+                                      size={16}
+                                      className="text-sky-300"
+                                    />
+                                    Historial de ejecuciones
+                                  </div>
+
+                                  {historyState?.loading && (
+                                    <div className="flex items-center gap-2 text-sm text-slate-400">
+                                      <LoaderCircle
+                                        size={15}
+                                        className="animate-spin"
+                                      />
+                                      Cargando historial...
+                                    </div>
+                                  )}
+
+                                  {historyState?.error && (
+                                    <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                                      {historyState.error}
+                                    </div>
+                                  )}
+
+                                  {history &&
+                                    !historyState.loading &&
+                                    !historyState.error && (
+                                      <>
+                                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Ejecuciones
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatNumber(
+                                                history.summary
+                                                  .count,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Tokens entrada
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatNumber(
+                                                history.summary
+                                                  .inputTokens,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Tokens salida
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatNumber(
+                                                history.summary
+                                                  .outputTokens,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Tokens totales
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatNumber(
+                                                history.summary
+                                                  .totalTokens,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="text-[11px] uppercase text-slate-500">
+                                              Duración total
+                                            </p>
+                                            <strong className="mt-1 block text-sm text-white">
+                                              {formatDuration(
+                                                history.summary
+                                                  .durationMs,
+                                              )}
+                                            </strong>
+                                          </div>
+                                        </div>
+
+                                        {history.executions
+                                          .length === 0 ? (
+                                          <div className="mt-4 rounded-lg border border-dashed border-white/10 px-4 py-6 text-center text-sm text-slate-500">
+                                            Sin ejecuciones
+                                            registradas
+                                          </div>
+                                        ) : (
+                                          <div className="mt-4 space-y-3">
+                                            {history.executions.map(
+                                              (
+                                                execution,
+                                                index,
+                                              ) => {
+                                                const executionStatus =
+                                                  pickValue(
+                                                    execution,
+                                                    [
+                                                      "status",
+                                                      "state",
+                                                    ],
+                                                  ) ||
+                                                  "Sin datos";
+                                                const statusClass =
+                                                  executionStatusClasses[
+                                                    executionStatus
+                                                  ] ||
+                                                  "bg-slate-500/15 text-slate-300";
+                                                const errorMessage =
+                                                  pickValue(
+                                                    execution,
+                                                    [
+                                                      "error_message",
+                                                      "errorMessage",
+                                                      "error",
+                                                    ],
+                                                  );
+
+                                                return (
+                                                  <div
+                                                    key={
+                                                      execution.id ||
+                                                      index
+                                                    }
+                                                    className="rounded-lg border border-white/10 bg-black/20 p-3"
+                                                  >
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                      <span
+                                                        className={`rounded-full px-2 py-1 text-[11px] ${statusClass}`}
+                                                      >
+                                                        {
+                                                          executionStatus
+                                                        }
+                                                      </span>
+
+                                                      <span className="text-xs font-medium text-slate-300">
+                                                        {pickValue(
+                                                          execution,
+                                                          [
+                                                            "execution_type",
+                                                            "executionType",
+                                                            "type",
+                                                          ],
+                                                        ) ||
+                                                          "Sin datos"}
+                                                      </span>
+
+                                                      <span className="text-xs text-slate-500">
+                                                        {formatDateTime(
+                                                          pickValue(
+                                                            execution,
+                                                            [
+                                                              "created_at",
+                                                              "createdAt",
+                                                              "started_at",
+                                                              "startedAt",
+                                                              "executed_at",
+                                                              "executedAt",
+                                                            ],
+                                                          ),
+                                                        )}
+                                                      </span>
+                                                    </div>
+
+                                                    <div className="mt-3 grid gap-2 text-xs text-slate-400 sm:grid-cols-2 xl:grid-cols-3">
+                                                      <p>
+                                                        Agente/proveedor:{" "}
+                                                        <span className="text-slate-200">
+                                                          {pickValue(
+                                                            execution,
+                                                            [
+                                                              "agent_name",
+                                                              "agentName",
+                                                              "agent",
+                                                              "provider_name",
+                                                              "providerName",
+                                                              "provider",
+                                                            ],
+                                                          ) ||
+                                                            "Sin datos"}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Modelo:{" "}
+                                                        <span className="text-slate-200">
+                                                          {pickValue(
+                                                            execution,
+                                                            [
+                                                              "model",
+                                                              "model_name",
+                                                              "modelName",
+                                                            ],
+                                                          ) ||
+                                                            "Sin datos"}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Duración:{" "}
+                                                        <span className="text-slate-200">
+                                                          {formatDuration(
+                                                            getDurationMs(
+                                                              execution,
+                                                            ),
+                                                          )}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Entrada:{" "}
+                                                        <span className="text-slate-200">
+                                                          {formatNumber(
+                                                            getInputTokens(
+                                                              execution,
+                                                            ),
+                                                          )}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Salida:{" "}
+                                                        <span className="text-slate-200">
+                                                          {formatNumber(
+                                                            getOutputTokens(
+                                                              execution,
+                                                            ),
+                                                          )}
+                                                        </span>
+                                                      </p>
+
+                                                      <p>
+                                                        Total:{" "}
+                                                        <span className="text-slate-200">
+                                                          {formatNumber(
+                                                            getDisplayTotalTokens(
+                                                              execution,
+                                                            ),
+                                                          )}
+                                                        </span>
+                                                      </p>
+                                                    </div>
+
+                                                    {errorMessage && (
+                                                      <p className="mt-3 whitespace-pre-wrap rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                                                        {errorMessage}
+                                                      </p>
+                                                    )}
+                                                  </div>
+                                                );
+                                              },
+                                            )}
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                </div>
+                              );
+                            })()}
                         </div>
 
                         <div className="flex shrink-0 flex-col items-end gap-3">
                           <span className="text-xs text-slate-500">
                             {task.project_name}
                           </span>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              toggleTaskHistory(task.id)
+                            }
+                            className="flex items-center gap-2 rounded-lg border border-sky-500/30 px-3 py-2 text-xs font-semibold text-sky-300 hover:bg-sky-500/10"
+                          >
+                            <History size={14} />
+                            {openHistoryTaskId === task.id
+                              ? "Ocultar historial"
+                              : "Historial"}
+                          </button>
 
                           {task.status ===
                             "queued" && (
