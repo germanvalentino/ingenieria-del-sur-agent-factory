@@ -438,14 +438,16 @@ router.post(
       );
 
      
-     const qaResult =
+const qaResult =
   await runQaValidation({
     workingDirectory:
       task.agent_working_path,
     taskTitle: task.title,
     taskDescription:
       task.description,
-  });   
+    correctionFeedback:
+      task.correction_feedback,
+  });
       const updatedTask =
         await pool.query(
           `
@@ -739,8 +741,9 @@ INSTRUCCIONES:
             UPDATE tasks
             SET status = 'review',
                 qa_status = 'pending',
-                review_feedback = NULL,
-                correction_count =
+correction_feedback = review_feedback,
+review_feedback = NULL,
+correction_count =
                   correction_count + 1,
                 execution_finished_at = NOW(),
                 result_summary =

@@ -188,6 +188,7 @@ export async function runQaValidation({
   workingDirectory,
   taskTitle,
   taskDescription,
+  correctionFeedback,
 }) {
   const safeDirectory =
     validateDirectory(workingDirectory);
@@ -272,6 +273,15 @@ ${
   taskDescription ||
   "Sin descripción adicional."
 }
+
+OBSERVACIONES HUMANAS POSTERIORES:
+${
+  correctionFeedback ||
+  "No existen observaciones posteriores."
+}
+
+IMPORTANTE:
+Si las observaciones humanas posteriores contradicen el requerimiento original, las observaciones posteriores tienen prioridad porque representan la decisión más reciente del revisor.
 
 INSTRUCCIONES:
 - Revisá exclusivamente el STATUS y DIFF entregados dentro de este mensaje.
