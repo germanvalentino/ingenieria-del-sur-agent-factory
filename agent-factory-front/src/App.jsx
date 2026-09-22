@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import {
   Bot,
   CheckCircle2,
@@ -23,6 +23,26 @@ const initialForm = {
   assignedRole: "backend",
 };
 
+const initialDashboard = {
+  projects: [],
+  agents: [],
+  tasks: [],
+  metrics: {
+    totalTasks: 0,
+    queuedTasks: 0,
+    runningTasks: 0,
+    passedTasks: 0,
+    failedTasks: 0,
+  },
+};
+
+const initialDashboardState = {
+  dashboard: initialDashboard,
+  loading: true,
+  error: "",
+  lastUpdateTime: "",
+};
+
 const statusClasses = {
   backlog: "bg-slate-500/15 text-slate-300",
   queued: "bg-amber-500/15 text-amber-300",
@@ -44,6 +64,97 @@ function formatUpdateTime(date) {
     hour12: false,
   });
 }
+
+function getErrorMessage(error) {
+  return error instanceof Error
+    ? error.message
+    : "OcurriÃ³ un error inesperado";
+}
+
+function createDashboardStore() {
+  let dashboardState = initialDashboardState;
+  const listeners = new Set();
+
+  function emitChange() {
+    listeners.forEach((listener) => listener());
+  }
+
+  function setDashboardState(update) {
+    dashboardState =
+      typeof update === "function"
+        ? update(dashboardState)
+        : update;
+    emitChange();
+  }
+
+  async function loadDashboard() {
+    try {
+      setDashboardState((current) => ({
+        ...current,
+        loading: true,
+        error: "",
+      }));
+
+      const response = await fetch(
+        `${API_URL}/dashboard`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          "No se pudo cargar el dashboard"
+        );
+      }
+
+      const data = await response.json();
+
+      setDashboardState((current) => ({
+        ...current,
+        dashboard: data,
+        loading: false,
+        lastUpdateTime: formatUpdateTime(new Date()),
+      }));
+    } catch (error) {
+      setDashboardState((current) => ({
+        ...current,
+        error: getErrorMessage(error),
+        loading: false,
+      }));
+    }
+  }
+
+  loadDashboard();
+
+  return {
+    getSnapshot() {
+      return dashboardState;
+    },
+    setError(message) {
+      setDashboardState((current) => ({
+        ...current,
+        error: message,
+      }));
+    },
+    updateDashboard(update) {
+      setDashboardState((current) => ({
+        ...current,
+        dashboard:
+          typeof update === "function"
+            ? update(current.dashboard)
+            : update,
+      }));
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    loadDashboard,
+  };
+}
+
+const dashboardStore = createDashboardStore();
 
 function MetricCard({
   title,
@@ -69,67 +180,27 @@ function MetricCard({
 }
 
 function App() {
-  const [dashboard, setDashboard] = useState({
-    projects: [],
-    agents: [],
-    tasks: [],
-    metrics: {
-      totalTasks: 0,
-      queuedTasks: 0,
-      runningTasks: 0,
-      passedTasks: 0,
-      failedTasks: 0,
-    },
-  });
-
   const [form, setForm] = useState(initialForm);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [runningTaskId, setRunningTaskId] =
     useState(null);
   const [qaTaskId, setQaTaskId] = useState(null);
-  const [error, setError] = useState("");
-  const [lastUpdateTime, setLastUpdateTime] =
-    useState("");
-
-  async function loadDashboard() {
-    try {
-      setLoading(true);
-      setError("");
-
-      const response = await fetch(
-        `${API_URL}/dashboard`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          "No se pudo cargar el dashboard"
-        );
-      }
-
-      const data = await response.json();
-
-      setDashboard(data);
-
-      setForm((current) => ({
-        ...current,
-        projectId:
-          current.projectId ||
-          data.projects[0]?.id ||
-          "",
-      }));
-
-      setLastUpdateTime(formatUpdateTime(new Date()));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    loadDashboard();
-  }, []);
+  const {
+    dashboard,
+    loading,
+    error,
+    lastUpdateTime,
+  } = useSyncExternalStore(
+    dashboardStore.subscribe,
+    dashboardStore.getSnapshot
+  );
+  const selectedProjectId =
+    form.projectId || dashboard.projects[0]?.id || "";
+  const loadDashboard = dashboardStore.loadDashboard;
+  const setDashboard = dashboardStore.updateDashboard;
+  const setError = (message) => {
+    dashboardStore.setError(message);
+  };
 
   function handleChange(event) {
     const { name, value } = event.target;
@@ -143,7 +214,7 @@ function App() {
   async function handleSubmit(event) {
     event.preventDefault();
 
-    if (!form.projectId || !form.title.trim()) {
+    if (!selectedProjectId || !form.title.trim()) {
       setError(
         "Seleccioná un proyecto e ingresá un título"
       );
@@ -161,7 +232,10 @@ function App() {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(form),
+          body: JSON.stringify({
+            ...form,
+            projectId: selectedProjectId,
+          }),
         }
       );
 
@@ -176,12 +250,13 @@ function App() {
 
       setForm((current) => ({
         ...initialForm,
-        projectId: current.projectId,
+        projectId:
+          current.projectId || selectedProjectId,
       }));
 
       await loadDashboard();
     } catch (err) {
-      setError(err.message);
+      setError(getErrorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -222,7 +297,7 @@ function App() {
 
       await loadDashboard();
     } catch (err) {
-      setError(err.message);
+      setError(getErrorMessage(err));
       await loadDashboard();
     } finally {
       setRunningTaskId(null);
@@ -263,7 +338,7 @@ async function runQa(taskId) {
 
     await loadDashboard();
   } catch (err) {
-    setError(err.message);
+    setError(getErrorMessage(err));
     await loadDashboard();
   } finally {
     setQaTaskId(null);
@@ -290,7 +365,7 @@ async function runQa(taskId) {
 
     await loadDashboard();
   } catch (err) {
-    setError(err.message);
+    setError(getErrorMessage(err));
   }
 }
 
@@ -446,7 +521,7 @@ async function runQa(taskId) {
 
                     <select
                       name="projectId"
-                      value={form.projectId}
+                      value={selectedProjectId}
                       onChange={handleChange}
                       className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5"
                     >
