@@ -754,6 +754,16 @@ async function correctTask(taskId) {
                             <span className="text-xs uppercase text-slate-500">
                               {task.assigned_role}
                             </span>
+
+                            {Number(task.correction_count) > 0 && (
+                              <span className="text-xs text-amber-300">
+                                {Number(
+                                  task.correction_count,
+                                ) === 1
+                                  ? "1 corrección"
+                                  : `${task.correction_count} correcciones`}
+                              </span>
+                            )}
                           </div>
 
                           <h4 className="mt-3 font-medium text-white">
