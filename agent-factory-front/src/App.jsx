@@ -1181,12 +1181,12 @@ async function correctTask(taskId) {
                                     !historyState.loading &&
                                     !historyState.error && (
                                       <>
-                                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(120px,100%),1fr))] gap-2">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Ejecuciones
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatNumber(
                                                 history.summary
                                                   .count,
@@ -1194,11 +1194,11 @@ async function correctTask(taskId) {
                                             </strong>
                                           </div>
 
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Tokens entrada
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatNumber(
                                                 history.summary
                                                   .inputTokens,
@@ -1206,11 +1206,11 @@ async function correctTask(taskId) {
                                             </strong>
                                           </div>
 
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Tokens caché
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatNumber(
                                                 history.summary
                                                   .cachedInputTokens,
@@ -1218,11 +1218,11 @@ async function correctTask(taskId) {
                                             </strong>
                                           </div>
 
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Entrada no cacheada
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatNumber(
                                                 history.summary
                                                   .nonCachedInputTokens,
@@ -1230,11 +1230,11 @@ async function correctTask(taskId) {
                                             </strong>
                                           </div>
 
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Tokens salida
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatNumber(
                                                 history.summary
                                                   .outputTokens,
@@ -1242,11 +1242,11 @@ async function correctTask(taskId) {
                                             </strong>
                                           </div>
 
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Tokens totales
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatNumber(
                                                 history.summary
                                                   .totalTokens,
@@ -1254,11 +1254,11 @@ async function correctTask(taskId) {
                                             </strong>
                                           </div>
 
-                                          <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                                            <p className="text-[11px] uppercase text-slate-500">
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Duración total
                                             </p>
-                                            <strong className="mt-1 block text-sm text-white">
+                                            <strong className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm tabular-nums text-white">
                                               {formatDuration(
                                                 history.summary
                                                   .durationMs,
@@ -1350,8 +1350,8 @@ async function correctTask(taskId) {
                                                       </span>
                                                     </div>
 
-                                                    <div className="mt-3 grid gap-2 text-xs text-slate-400 sm:grid-cols-2 xl:grid-cols-3">
-                                                      <p>
+                                                    <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(180px,100%),1fr))] gap-2 text-xs text-slate-400">
+                                                      <p className="min-w-0 break-words">
                                                         Agente/proveedor:{" "}
                                                         <span className="text-slate-200">
                                                           {pickValue(
@@ -1369,7 +1369,7 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0 break-words">
                                                         Modelo:{" "}
                                                         <span className="text-slate-200">
                                                           {pickValue(
@@ -1384,9 +1384,9 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0">
                                                         Duración:{" "}
-                                                        <span className="text-slate-200">
+                                                        <span className="whitespace-nowrap tabular-nums text-slate-200">
                                                           {formatDuration(
                                                             getDurationMs(
                                                               execution,
@@ -1395,9 +1395,9 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0">
                                                         Tokens entrada:{" "}
-                                                        <span className="text-slate-200">
+                                                        <span className="whitespace-nowrap tabular-nums text-slate-200">
                                                           {formatNumber(
                                                             getInputTokens(
                                                               execution,
@@ -1406,9 +1406,9 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0">
                                                         Tokens caché:{" "}
-                                                        <span className="text-slate-200">
+                                                        <span className="whitespace-nowrap tabular-nums text-slate-200">
                                                           {formatNumber(
                                                             getCachedInputTokens(
                                                               execution,
@@ -1417,9 +1417,9 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0">
                                                         Entrada no cacheada:{" "}
-                                                        <span className="text-slate-200">
+                                                        <span className="whitespace-nowrap tabular-nums text-slate-200">
                                                           {formatNumber(
                                                             getNonCachedInputTokens(
                                                               execution,
@@ -1428,9 +1428,9 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0">
                                                         Tokens salida:{" "}
-                                                        <span className="text-slate-200">
+                                                        <span className="whitespace-nowrap tabular-nums text-slate-200">
                                                           {formatNumber(
                                                             getOutputTokens(
                                                               execution,
@@ -1439,9 +1439,9 @@ async function correctTask(taskId) {
                                                         </span>
                                                       </p>
 
-                                                      <p>
+                                                      <p className="min-w-0">
                                                         Tokens totales:{" "}
-                                                        <span className="text-slate-200">
+                                                        <span className="whitespace-nowrap tabular-nums text-slate-200">
                                                           {formatNumber(
                                                             getDisplayTotalTokens(
                                                               execution,
