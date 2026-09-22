@@ -8,23 +8,57 @@ function toNumberOrNull(value) {
   return Number.isFinite(value) ? value : null;
 }
 
+function firstNumber(...values) {
+  for (const value of values) {
+    const normalized = toNumberOrNull(value);
+
+    if (normalized !== null) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
 function normalizeUsage(usage) {
   if (!usage || typeof usage !== "object") {
     return null;
   }
 
-  const inputTokens = toNumberOrNull(
-    usage.input_tokens
+  const inputTokens = firstNumber(
+    usage.input_tokens,
+    usage.inputTokens,
+    usage.prompt_tokens,
+    usage.promptTokens
   );
-  const outputTokens = toNumberOrNull(
-    usage.output_tokens
+  const cachedInputTokens = firstNumber(
+    usage.cached_input_tokens,
+    usage.cachedInputTokens,
+    usage.input_tokens_details
+      ?.cached_tokens,
+    usage.input_tokens_details
+      ?.cached_input_tokens,
+    usage.inputTokensDetails
+      ?.cachedTokens,
+    usage.prompt_tokens_details
+      ?.cached_tokens,
+    usage.promptTokensDetails
+      ?.cachedTokens
   );
-  const totalTokens = toNumberOrNull(
-    usage.total_tokens
+  const outputTokens = firstNumber(
+    usage.output_tokens,
+    usage.outputTokens,
+    usage.completion_tokens,
+    usage.completionTokens
+  );
+  const totalTokens = firstNumber(
+    usage.total_tokens,
+    usage.totalTokens
   );
 
   return {
     inputTokens,
+    cachedInputTokens,
     outputTokens,
     totalTokens:
       totalTokens ??
@@ -52,6 +86,11 @@ function parseCodexJsonOutput(output) {
     try {
       const event = JSON.parse(trimmed);
       events.push(event);
+      model =
+        event.model ??
+        event.provider_model ??
+        event.providerModel ??
+        model;
 
       if (
         event.type === "item.completed" &&
@@ -63,10 +102,6 @@ function parseCodexJsonOutput(output) {
 
       if (event.type === "turn.completed") {
         usage = normalizeUsage(event.usage);
-        model =
-          event.model ??
-          event.provider_model ??
-          model;
       }
 
       if (

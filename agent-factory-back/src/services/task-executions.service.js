@@ -8,6 +8,7 @@ function normalizeUsage(usage) {
   if (!usage) {
     return {
       inputTokens: null,
+      cachedInputTokens: null,
       outputTokens: null,
       totalTokens: null,
     };
@@ -19,12 +20,16 @@ function normalizeUsage(usage) {
   const outputTokens = normalizeTokenValue(
     usage.outputTokens
   );
+  const cachedInputTokens = normalizeTokenValue(
+    usage.cachedInputTokens
+  );
   const totalTokens = normalizeTokenValue(
     usage.totalTokens
   );
 
   return {
     inputTokens,
+    cachedInputTokens,
     outputTokens,
     totalTokens:
       totalTokens ??
@@ -95,10 +100,11 @@ export async function finishTaskExecution({
       UPDATE task_executions
       SET status = $2,
           input_tokens = $3,
-          output_tokens = $4,
-          total_tokens = $5,
-          model = COALESCE($6, model),
-          error_message = $7,
+          cached_input_tokens = $4,
+          output_tokens = $5,
+          total_tokens = $6,
+          model = COALESCE($7, model),
+          error_message = $8,
           finished_at = NOW(),
           duration_ms =
             FLOOR(
@@ -113,6 +119,7 @@ export async function finishTaskExecution({
       executionId,
       status,
       normalizedUsage.inputTokens,
+      normalizedUsage.cachedInputTokens,
       normalizedUsage.outputTokens,
       normalizedUsage.totalTokens,
       model,
@@ -139,6 +146,7 @@ export async function getTaskExecutionsSummary(
             model,
             status,
             input_tokens,
+            cached_input_tokens,
             output_tokens,
             total_tokens,
             started_at,
@@ -159,6 +167,23 @@ export async function getTaskExecutionsSummary(
             COUNT(*)::INT AS total_executions,
             COALESCE(SUM(input_tokens), 0)::BIGINT
               AS total_input_tokens,
+            COALESCE(SUM(cached_input_tokens), 0)::BIGINT
+              AS total_cached_input_tokens,
+            COALESCE(
+              SUM(
+                CASE
+                  WHEN input_tokens IS NOT NULL
+                    AND cached_input_tokens IS NOT NULL
+                    THEN GREATEST(
+                      input_tokens - cached_input_tokens,
+                      0
+                    )
+                  ELSE NULL
+                END
+              ),
+              0
+            )::BIGINT
+              AS total_non_cached_input_tokens,
             COALESCE(SUM(output_tokens), 0)::BIGINT
               AS total_output_tokens,
             COALESCE(SUM(total_tokens), 0)::BIGINT
@@ -181,6 +206,12 @@ export async function getTaskExecutionsSummary(
         summary.total_executions,
       totalInputTokens: Number(
         summary.total_input_tokens
+      ),
+      totalCachedInputTokens: Number(
+        summary.total_cached_input_tokens
+      ),
+      totalNonCachedInputTokens: Number(
+        summary.total_non_cached_input_tokens
       ),
       totalOutputTokens: Number(
         summary.total_output_tokens
