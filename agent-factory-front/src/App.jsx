@@ -36,6 +36,15 @@ function pluralizeCount(count, singular, plural) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function formatUpdateTime(date) {
+  return date.toLocaleTimeString("es-AR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 function MetricCard({
   title,
   value,
@@ -80,6 +89,8 @@ function App() {
     useState(null);
   const [qaTaskId, setQaTaskId] = useState(null);
   const [error, setError] = useState("");
+  const [lastUpdateTime, setLastUpdateTime] =
+    useState("");
 
   async function loadDashboard() {
     try {
@@ -107,6 +118,8 @@ function App() {
           data.projects[0]?.id ||
           "",
       }));
+
+      setLastUpdateTime(formatUpdateTime(new Date()));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -296,6 +309,12 @@ async function runQa(taskId) {
           </div>
 
           <div className="flex items-center gap-3">
+            {lastUpdateTime && (
+              <span className="text-xs text-slate-500">
+                Última actualización: {lastUpdateTime}
+              </span>
+            )}
+
             <button
               type="button"
               onClick={loadDashboard}
