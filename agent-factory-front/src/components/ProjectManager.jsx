@@ -267,7 +267,11 @@ function ProjectManager({ onProjectsChanged }) {
           <button
             type="submit"
             disabled={saving}
-            className="inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-5 py-2.5 font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
+            style={{
+              backgroundColor: "#06b6d4",
+              color: "#020617",
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-cyan-300 px-5 py-2.5 font-semibold transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {editingId ? (
               <Save className="h-4 w-4" />
