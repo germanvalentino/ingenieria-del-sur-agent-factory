@@ -39,11 +39,29 @@ export async function recoverInterruptedTasks() {
       RETURNING id, name
     `);
 
+    const executionsResult = await client.query(`
+      UPDATE task_executions
+      SET status = 'failed',
+          finished_at = NOW(),
+          duration_ms =
+            FLOOR(
+              EXTRACT(
+                EPOCH FROM (NOW() - started_at)
+              ) * 1000
+            )::BIGINT,
+          error_message =
+            'La ejecuciÃ³n fue interrumpida por un reinicio del backend.'
+      WHERE status = 'running'
+      RETURNING id, task_id
+    `);
+
     await client.query("COMMIT");
 
     return {
       recoveredTasks: tasksResult.rows,
       recoveredAgents: agentsResult.rows,
+      recoveredExecutions:
+        executionsResult.rows,
     };
   } catch (error) {
     await client.query("ROLLBACK");

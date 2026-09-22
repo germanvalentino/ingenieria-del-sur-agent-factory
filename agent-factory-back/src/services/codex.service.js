@@ -4,6 +4,99 @@ import path from "node:path";
 
 const MAX_EXECUTION_TIME = 15 * 60 * 1000;
 
+function toNumberOrNull(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+
+  const inputTokens = toNumberOrNull(
+    usage.input_tokens
+  );
+  const outputTokens = toNumberOrNull(
+    usage.output_tokens
+  );
+  const totalTokens = toNumberOrNull(
+    usage.total_tokens
+  );
+
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens:
+      totalTokens ??
+      (inputTokens !== null &&
+      outputTokens !== null
+        ? inputTokens + outputTokens
+        : null),
+  };
+}
+
+function parseCodexJsonOutput(output) {
+  const events = [];
+  const agentMessages = [];
+  let usage = null;
+  let model = null;
+  let streamError = null;
+
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    try {
+      const event = JSON.parse(trimmed);
+      events.push(event);
+
+      if (
+        event.type === "item.completed" &&
+        event.item?.type === "agent_message" &&
+        typeof event.item.text === "string"
+      ) {
+        agentMessages.push(event.item.text);
+      }
+
+      if (event.type === "turn.completed") {
+        usage = normalizeUsage(event.usage);
+        model =
+          event.model ??
+          event.provider_model ??
+          model;
+      }
+
+      if (
+        event.type === "error" ||
+        event.type === "turn.failed"
+      ) {
+        streamError =
+          event.message ??
+          event.error?.message ??
+          streamError;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  if (events.length === 0) {
+    return null;
+  }
+
+  return {
+    output:
+      agentMessages.at(-1)?.trim() ||
+      output.trim(),
+    usage,
+    model,
+    streamError,
+  };
+}
+
 export function executeCodex({
   workingDirectory,
   prompt,
@@ -54,6 +147,7 @@ export function executeCodex({
       "codex",
       [
         "exec",
+        "--json",
         "--color",
         "never",
         "--ephemeral",
@@ -99,11 +193,15 @@ export function executeCodex({
 
     child.on("close", (code) => {
       clearTimeout(timeout);
+      const parsedOutput =
+        parseCodexJsonOutput(stdout);
 
       if (code !== 0) {
         reject(
           new Error(
-            stderr ||
+            parsedOutput?.streamError ||
+              stderr ||
+              parsedOutput?.output ||
               stdout ||
               `Codex finalizó con código ${code}`
           )
@@ -113,7 +211,12 @@ export function executeCodex({
 
       resolve({
         exitCode: code,
-        output: stdout.trim() || stderr.trim(),
+        output:
+          parsedOutput?.output ||
+          stdout.trim() ||
+          stderr.trim(),
+        usage: parsedOutput?.usage ?? null,
+        model: parsedOutput?.model ?? null,
       });
     });
 

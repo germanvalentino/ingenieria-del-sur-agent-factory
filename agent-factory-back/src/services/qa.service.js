@@ -695,6 +695,8 @@ export async function runQaValidation({
           status: "failed",
           summary: commandsSummary,
           results,
+          codexUsage: null,
+          codexModel: null,
         };
       }
     }
@@ -745,6 +747,8 @@ export async function runQaValidation({
       status: "failed",
       summary: commandsSummary,
       results,
+      codexUsage: null,
+      codexModel: null,
     };
   }
 
@@ -831,5 +835,7 @@ RIESGOS:
     summary,
     results,
     review: codexReview.output,
+    codexUsage: codexReview.usage,
+    codexModel: codexReview.model,
   };
 }

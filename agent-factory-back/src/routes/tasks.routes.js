@@ -9,6 +9,11 @@ import {
   getWorktreeStatus,
   prepareTaskWorktree,
 } from "../services/git-worktree.service.js";
+import {
+  finishTaskExecution,
+  getTaskExecutionsSummary,
+  startTaskExecution,
+} from "../services/task-executions.service.js";
 const router = Router();
 
 const VALID_ROLES = [
@@ -186,10 +191,52 @@ router.post(
   }
 );
 
+router.get(
+  "/:id/executions",
+  async (req, res) => {
+    try {
+      const taskResult = await pool.query(
+        `
+          SELECT id
+          FROM tasks
+          WHERE id = $1
+        `,
+        [req.params.id]
+      );
+
+      if (taskResult.rowCount === 0) {
+        return res.status(404).json({
+          status: "error",
+          message: "Tarea no encontrada",
+        });
+      }
+
+      const result =
+        await getTaskExecutionsSummary(
+          req.params.id
+        );
+
+      res.json(result);
+    } catch (error) {
+      console.error(
+        "Error obteniendo ejecuciones:",
+        error
+      );
+
+      res.status(500).json({
+        status: "error",
+        message:
+          "No se pudieron obtener las ejecuciones",
+      });
+    }
+  }
+);
+
 
 router.post("/:id/run", async (req, res) => {
   let agentId;
   let worktree;
+  let executionId;
 
   try {
     const taskResult = await pool.query(
@@ -327,6 +374,16 @@ WHERE id = $1
       [agent.id]
     );
 
+    const execution =
+      await startTaskExecution({
+        taskId: task.id,
+        agentId: agent.id,
+        executionType: "development",
+        provider: agent.provider,
+      });
+
+    executionId = execution.id;
+
     const prompt = `
 Sos el ${agent.name} de Ingeniería del Sur.
 
@@ -406,6 +463,14 @@ REGLAS OBLIGATORIAS:
       ]
     );
 
+    await finishTaskExecution({
+      executionId,
+      status: "passed",
+      usage: result.usage,
+      model: result.model,
+    });
+    executionId = null;
+
     await pool.query(
       `
         UPDATE agents
@@ -438,6 +503,12 @@ REGLAS OBLIGATORIAS:
       ]
     );
 
+    await finishTaskExecution({
+      executionId,
+      status: "failed",
+      errorMessage: error.message,
+    });
+
     if (agentId) {
       await pool.query(
         `
@@ -461,6 +532,7 @@ router.post(
   "/:id/qa",
   async (req, res) => {
     let qaAgentId;
+    let executionId;
 
     try {
       const taskResult = await pool.query(
@@ -549,6 +621,16 @@ router.post(
         [qaAgent.id]
       );
 
+      const execution =
+        await startTaskExecution({
+          taskId: task.id,
+          agentId: qaAgent.id,
+          executionType: "qa",
+          provider: qaAgent.provider,
+        });
+
+      executionId = execution.id;
+
      
 const qaResult =
   await runQaValidation({
@@ -579,6 +661,14 @@ const qaResult =
             qaResult.summary.slice(-15000),
           ]
         );
+
+      await finishTaskExecution({
+        executionId,
+        status: qaResult.status,
+        usage: qaResult.codexUsage,
+        model: qaResult.codexModel,
+      });
+      executionId = null;
 
       await pool.query(
         `
@@ -611,6 +701,12 @@ const qaResult =
           error.message.slice(-15000),
         ]
       );
+
+      await finishTaskExecution({
+        executionId,
+        status: "failed",
+        errorMessage: error.message,
+      });
 
       if (qaAgentId) {
         await pool.query(
@@ -699,6 +795,7 @@ router.post(
   "/:id/correct",
   async (req, res) => {
     let agentId;
+    let executionId;
 
     try {
       const taskResult = await pool.query(
@@ -790,6 +887,16 @@ router.post(
         [agent.id]
       );
 
+      const execution =
+        await startTaskExecution({
+          taskId: task.id,
+          agentId: agent.id,
+          executionType: "correction",
+          provider: agent.provider,
+        });
+
+      executionId = execution.id;
+
       const prompt = `
 Sos el ${agent.name} de Ingeniería del Sur.
 
@@ -878,6 +985,14 @@ correction_count =
           ]
         );
 
+      await finishTaskExecution({
+        executionId,
+        status: "passed",
+        usage: correctionResult.usage,
+        model: correctionResult.model,
+      });
+      executionId = null;
+
       await pool.query(
         `
           UPDATE agents
@@ -917,6 +1032,12 @@ correction_count =
           ),
         ]
       );
+
+      await finishTaskExecution({
+        executionId,
+        status: "failed",
+        errorMessage: error.message,
+      });
 
       if (agentId) {
         await pool.query(
