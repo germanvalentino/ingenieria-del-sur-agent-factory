@@ -554,6 +554,8 @@ const qaResult =
   await runQaValidation({
     workingDirectory:
       task.agent_working_path,
+    baseBranch:
+      task.base_branch || "main",
     taskTitle: task.title,
     taskDescription:
       task.description,

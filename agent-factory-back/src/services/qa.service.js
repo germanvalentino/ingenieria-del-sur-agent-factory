@@ -7,6 +7,7 @@ import { executeCodex } from "./codex.service.js";
 const execFileAsync = promisify(execFile);
 
 const MAX_COMMAND_TIME = 5 * 60 * 1000;
+const MAX_COMMAND_BUFFER = 10 * 1024 * 1024;
 const ALLOWED_ROOT = path.resolve(
   "C:/proyectos"
 );
@@ -49,7 +50,7 @@ async function executeNpmScript({
         cwd: workingDirectory,
         windowsHide: true,
         timeout: MAX_COMMAND_TIME,
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: MAX_COMMAND_BUFFER,
       }
     );
 
@@ -80,6 +81,285 @@ async function executeNpmScript({
   }
 }
 
+async function executeNpmCi(workingDirectory) {
+  try {
+    const commandProcessor =
+      process.env.ComSpec ||
+      "C:\\Windows\\System32\\cmd.exe";
+
+    const result = await execFileAsync(
+      commandProcessor,
+      [
+        "/d",
+        "/s",
+        "/c",
+        "npm.cmd ci",
+      ],
+      {
+        cwd: workingDirectory,
+        windowsHide: true,
+        timeout: MAX_COMMAND_TIME,
+        maxBuffer: MAX_COMMAND_BUFFER,
+      }
+    );
+
+    return {
+      script: "npm ci",
+      status: "passed",
+      output: [
+        result.stdout,
+        result.stderr,
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .trim(),
+    };
+  } catch (error) {
+    return {
+      script: "npm ci",
+      status: "failed",
+      output: [
+        error.stdout,
+        error.stderr,
+        error.message,
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .trim(),
+    };
+  }
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function ensureDependencies(
+  workingDirectory
+) {
+  const nodeModulesPath = path.join(
+    workingDirectory,
+    "node_modules"
+  );
+  const packageLockPath = path.join(
+    workingDirectory,
+    "package-lock.json"
+  );
+
+  if (await pathExists(packageLockPath)) {
+    return executeNpmCi(workingDirectory);
+  }
+
+  if (await pathExists(nodeModulesPath)) {
+    return null;
+  }
+
+  return {
+    script: "dependencies",
+    status: "failed",
+    output:
+      "QA no puede preparar dependencias: no existe package-lock.json para ejecutar npm ci ni node_modules para continuar sin instalar.",
+  };
+}
+
+async function hasInstalledDependencies(
+  workingDirectory
+) {
+  return pathExists(
+    path.join(workingDirectory, "node_modules")
+  );
+}
+
+function formatCommandLabel(script) {
+  if (script === "npm ci") {
+    return "npm ci";
+  }
+
+  if (script === "dependencies") {
+    return "preparar dependencias";
+  }
+
+  return `npm run ${script}`;
+}
+
+function isPlaceholderTest(scriptValue) {
+  return (
+    scriptValue?.trim() ===
+    'echo "Error: no test specified" && exit 1'
+  );
+}
+
+async function runGit(args, cwd) {
+  const result = await execFileAsync(
+    "git",
+    args,
+    {
+      cwd,
+      windowsHide: true,
+      timeout: MAX_COMMAND_TIME,
+      maxBuffer: MAX_COMMAND_BUFFER,
+    }
+  );
+
+  return result.stdout.trim();
+}
+
+async function getBaseWorkingDirectory(
+  workingDirectory
+) {
+  const worktreeRoot = await runGit(
+    ["rev-parse", "--show-toplevel"],
+    workingDirectory
+  );
+  const gitCommonDirectory = await runGit(
+    [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ],
+    workingDirectory
+  );
+  const repositoryRoot = path.dirname(
+    gitCommonDirectory
+  );
+  const relativeWorkingDirectory =
+    path.relative(
+      worktreeRoot,
+      workingDirectory
+    );
+
+  if (
+    relativeWorkingDirectory.startsWith("..")
+  ) {
+    throw new Error(
+      "QA no pudo calcular la carpeta equivalente en la rama base"
+    );
+  }
+
+  return validateDirectory(
+    path.join(
+      repositoryRoot,
+      relativeWorkingDirectory
+    )
+  );
+}
+
+function countLintErrors(output) {
+  const eslintSummaryMatch = output.match(
+    /(\d+)\s+errors?(?:\s+and\s+\d+\s+warnings?)?/i
+  );
+
+  if (eslintSummaryMatch) {
+    return Number(eslintSummaryMatch[1]);
+  }
+
+  return output
+    .split(/\r?\n/)
+    .filter((line) =>
+      /\serror\s/i.test(line)
+    ).length;
+}
+
+async function executeLintWithBaseline({
+  workingDirectory,
+  baseBranch,
+}) {
+  const lintResult = await executeNpmScript({
+    script: "lint",
+    workingDirectory,
+  });
+
+  if (lintResult.status === "passed") {
+    return lintResult;
+  }
+
+  const baseWorkingDirectory =
+    await getBaseWorkingDirectory(
+      workingDirectory
+    );
+
+  if (
+    !(await hasInstalledDependencies(
+      baseWorkingDirectory
+    ))
+  ) {
+    return {
+      script: "lint",
+      status: "failed",
+      output: [
+        "QA fallÃ³ al preparar la carpeta equivalente de la rama base para comparar lint.",
+        "QA no puede obtener la linea base de lint porque la carpeta equivalente de la rama base no tiene node_modules.",
+        "No se ejecuta npm ci en la rama base para no modificar node_modules.",
+        "",
+        "=== WORKTREE LINT ===",
+        lintResult.output,
+      ].join("\n"),
+    };
+  }
+
+  const baseLintResult =
+    await executeNpmScript({
+      script: "lint",
+      workingDirectory:
+        baseWorkingDirectory,
+    });
+
+  if (baseLintResult.status !== "failed") {
+    return lintResult;
+  }
+
+  const worktreeErrors = countLintErrors(
+    lintResult.output
+  );
+  const baseErrors = countLintErrors(
+    baseLintResult.output
+  );
+
+  if (worktreeErrors <= baseErrors) {
+    return {
+      script: "lint",
+      status: "warning",
+      output: [
+        "QA_BASELINE_WARNING",
+        `npm run lint fallÃ³ en ${baseBranch} y en el worktree, pero el worktree no agrega errores.`,
+        `Errores worktree: ${worktreeErrors}`,
+        `Errores ${baseBranch}: ${baseErrors}`,
+        "",
+        "=== WORKTREE LINT ===",
+        lintResult.output,
+        "",
+        `=== ${baseBranch} LINT ===`,
+        baseLintResult.output,
+      ].join("\n"),
+    };
+  }
+
+  return {
+    script: "lint",
+    status: "failed",
+    output: [
+      `npm run lint agrega errores frente a ${baseBranch}.`,
+      `Errores worktree: ${worktreeErrors}`,
+      `Errores ${baseBranch}: ${baseErrors}`,
+      "",
+      "=== WORKTREE LINT ===",
+      lintResult.output,
+      "",
+      `=== ${baseBranch} LINT ===`,
+      baseLintResult.output,
+    ].join("\n"),
+  };
+}
+
 async function getGitChanges(
   workingDirectory
 ) {
@@ -96,11 +376,11 @@ async function getGitChanges(
       ".",
     ],
     {
-      cwd: workingDirectory,
-      windowsHide: true,
-      timeout: MAX_COMMAND_TIME,
-      maxBuffer: 10 * 1024 * 1024,
-    }
+        cwd: workingDirectory,
+        windowsHide: true,
+        timeout: MAX_COMMAND_TIME,
+        maxBuffer: MAX_COMMAND_BUFFER,
+      }
   );
 
   const [statusResult, diffResult] =
@@ -112,7 +392,7 @@ async function getGitChanges(
           cwd: workingDirectory,
           windowsHide: true,
           timeout: MAX_COMMAND_TIME,
-          maxBuffer: 10 * 1024 * 1024,
+          maxBuffer: MAX_COMMAND_BUFFER,
         }
       ),
 
@@ -129,7 +409,7 @@ async function getGitChanges(
           cwd: workingDirectory,
           windowsHide: true,
           timeout: MAX_COMMAND_TIME,
-          maxBuffer: 10 * 1024 * 1024,
+          maxBuffer: MAX_COMMAND_BUFFER,
         }
       ),
     ]);
@@ -186,6 +466,7 @@ function parseQaVerdict(output) {
 
 export async function runQaValidation({
   workingDirectory,
+  baseBranch = "main",
   taskTitle,
   taskDescription,
   correctionFeedback,
@@ -210,7 +491,14 @@ export async function runQaValidation({
     "test",
     "build",
   ].filter(
-    (script) => availableScripts[script]
+    (script) =>
+      availableScripts[script] &&
+      !(
+        script === "test" &&
+        isPlaceholderTest(
+          availableScripts[script]
+        )
+      )
   );
 
   if (scriptsToRun.length === 0) {
@@ -220,12 +508,50 @@ export async function runQaValidation({
   }
 
   const results = [];
+  const dependenciesResult =
+    await ensureDependencies(
+      safeDirectory
+    );
+
+  if (dependenciesResult) {
+    results.push(dependenciesResult);
+
+    if (
+      dependenciesResult.status ===
+      "failed"
+    ) {
+      const commandsSummary = results
+        .map(
+          (result) =>
+            [
+              `=== ${formatCommandLabel(result.script)} ===`,
+              `RESULTADO: ${result.status.toUpperCase()}`,
+              result.output,
+            ].join("\n")
+        )
+        .join("\n\n");
+
+      return {
+        status: "failed",
+        summary: commandsSummary,
+        results,
+      };
+    }
+  }
 
   for (const script of scriptsToRun) {
-    const result = await executeNpmScript({
-      script,
-      workingDirectory: safeDirectory,
-    });
+    const result =
+      script === "lint"
+        ? await executeLintWithBaseline({
+            workingDirectory:
+              safeDirectory,
+            baseBranch,
+          })
+        : await executeNpmScript({
+            script,
+            workingDirectory:
+              safeDirectory,
+          });
 
     results.push(result);
 
@@ -236,14 +562,15 @@ export async function runQaValidation({
 
   const commandsPassed = results.every(
     (result) =>
-      result.status === "passed"
+      result.status === "passed" ||
+      result.status === "warning"
   );
 
   const commandsSummary = results
     .map(
       (result) =>
         [
-          `=== npm run ${result.script} ===`,
+          `=== ${formatCommandLabel(result.script)} ===`,
           `RESULTADO: ${result.status.toUpperCase()}`,
           result.output,
         ].join("\n")

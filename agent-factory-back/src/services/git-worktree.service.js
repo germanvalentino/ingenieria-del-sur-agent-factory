@@ -245,6 +245,11 @@ export async function finalizeTaskWorktree({
     );
   }
 
+  const originalHeadResult = await runGit(
+    ["rev-parse", "HEAD"],
+    safeWorktree
+  );
+
   await runGit(
     ["add", "--all"],
     safeWorktree
@@ -254,6 +259,49 @@ export async function finalizeTaskWorktree({
     ["commit", "-m", commitMessage],
     safeWorktree
   );
+
+  try {
+    await runGit(
+      ["rebase", baseBranch],
+      safeWorktree
+    );
+  } catch (error) {
+    const recoveryWarnings = [];
+
+    try {
+      await runGit(
+        ["rebase", "--abort"],
+        safeWorktree
+      );
+    } catch (abortError) {
+      recoveryWarnings.push(
+        `No se pudo abortar el rebase: ${abortError.message}`
+      );
+    }
+
+    try {
+      await runGit(
+        [
+          "reset",
+          "--mixed",
+          originalHeadResult.stdout,
+        ],
+        safeWorktree
+      );
+    } catch (resetError) {
+      recoveryWarnings.push(
+        `No se pudo recuperar el estado sin commit: ${resetError.message}`
+      );
+    }
+
+    throw new Error(
+      [
+        "El rebase automático falló por conflictos. Los cambios de la tarea quedaron recuperados sin commit en el worktree.",
+        error.message,
+        ...recoveryWarnings,
+      ].join("\n")
+    );
+  }
 
   const commitResult = await runGit(
     ["rev-parse", "HEAD"],
