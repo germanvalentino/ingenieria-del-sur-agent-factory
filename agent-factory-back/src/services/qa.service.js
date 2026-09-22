@@ -80,6 +80,83 @@ async function executeNpmScript({
   }
 }
 
+async function getGitChanges(
+  workingDirectory
+) {
+  /*
+   * Hace visibles en git diff también los archivos
+   * nuevos, sin agregarlos realmente al commit.
+   */
+  await execFileAsync(
+    "git",
+    [
+      "add",
+      "--intent-to-add",
+      "--",
+      ".",
+    ],
+    {
+      cwd: workingDirectory,
+      windowsHide: true,
+      timeout: MAX_COMMAND_TIME,
+      maxBuffer: 10 * 1024 * 1024,
+    }
+  );
+
+  const [statusResult, diffResult] =
+    await Promise.all([
+      execFileAsync(
+        "git",
+        ["status", "--short"],
+        {
+          cwd: workingDirectory,
+          windowsHide: true,
+          timeout: MAX_COMMAND_TIME,
+          maxBuffer: 10 * 1024 * 1024,
+        }
+      ),
+
+      execFileAsync(
+        "git",
+        [
+          "diff",
+          "--no-ext-diff",
+          "--unified=60",
+          "--",
+          ".",
+        ],
+        {
+          cwd: workingDirectory,
+          windowsHide: true,
+          timeout: MAX_COMMAND_TIME,
+          maxBuffer: 10 * 1024 * 1024,
+        }
+      ),
+    ]);
+
+  const status = statusResult.stdout.trim();
+  const diff = diffResult.stdout.trim();
+
+  if (!diff) {
+    throw new Error(
+      "QA no encontró cambios para revisar"
+    );
+  }
+
+  const MAX_DIFF_SIZE = 120000;
+
+  if (diff.length > MAX_DIFF_SIZE) {
+    throw new Error(
+      `El diff es demasiado grande para una sola revisión QA: ${diff.length} caracteres`
+    );
+  }
+
+  return {
+    status,
+    diff,
+  };
+}
+
 function parseQaVerdict(output) {
   const matches = [
     ...output.matchAll(
@@ -179,6 +256,8 @@ export async function runQaValidation({
       results,
     };
   }
+  const gitChanges =
+  await getGitChanges(safeDirectory);
 
   const reviewPrompt = `
 Sos el QA Agent de Ingeniería del Sur.
@@ -195,7 +274,9 @@ ${
 }
 
 INSTRUCCIONES:
-- Revisá únicamente los cambios actuales mostrados por git diff.
+- Revisá exclusivamente el STATUS y DIFF entregados dentro de este mensaje.
+- No intentes ejecutar git diff.
+- Podés leer archivos del proyecto solamente si necesitás contexto adicional.
 - No modifiques archivos.
 - No hagas commit, push, merge ni deploy.
 - Buscá errores lógicos, regresiones, problemas de seguridad y criterios incumplidos.
@@ -203,6 +284,14 @@ INSTRUCCIONES:
 - No rechaces por preferencias estéticas menores.
 - Si encontrás un problema real, emití QA_FAIL.
 - Si no encontrás problemas bloqueantes, emití QA_PASS.
+
+STATUS DE GIT:
+${gitChanges.status}
+
+DIFF EXACTO DE LA TAREA:
+\`\`\`diff
+${gitChanges.diff}
+\`\`\`
 
 FORMATO OBLIGATORIO:
 La primera línea de tu respuesta debe ser exactamente QA_PASS o QA_FAIL.
