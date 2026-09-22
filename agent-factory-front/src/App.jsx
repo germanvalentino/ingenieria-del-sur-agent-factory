@@ -951,6 +951,9 @@ async function correctTask(taskId) {
       <footer className="mt-10 border-t border-white/10 py-6 text-center text-sm text-slate-500">
         Ingeniería del Sur · MVP 0.1 · Agent Software
         Factory
+        <p className="mt-2 text-xs text-slate-600">
+          Ingeniería de software impulsada por agentes
+        </p>
       </footer>
     </div>
   );
