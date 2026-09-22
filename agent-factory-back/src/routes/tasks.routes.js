@@ -580,6 +580,248 @@ router.post(
 );
 
 router.post(
+  "/:id/correct",
+  async (req, res) => {
+    let agentId;
+
+    try {
+      const taskResult = await pool.query(
+        `
+          SELECT *
+          FROM tasks
+          WHERE id = $1
+        `,
+        [req.params.id]
+      );
+
+      const task = taskResult.rows[0];
+
+      if (!task) {
+        return res.status(404).json({
+          status: "error",
+          message: "Tarea no encontrada",
+        });
+      }
+
+      if (task.status !== "review") {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea debe estar en revisión",
+        });
+      }
+
+      if (!task.review_feedback) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no tiene observaciones para corregir",
+        });
+      }
+
+      if (!task.agent_working_path) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no tiene un worktree activo",
+        });
+      }
+
+      const agentResult = await pool.query(
+        `
+          SELECT *
+          FROM agents
+          WHERE role = $1
+            AND active = TRUE
+          LIMIT 1
+        `,
+        [task.assigned_role]
+      );
+
+      const agent = agentResult.rows[0];
+
+      if (!agent) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "No existe un agente activo para corregir la tarea",
+        });
+      }
+
+      agentId = agent.id;
+
+      await pool.query(
+        `
+          UPDATE tasks
+          SET status = 'running',
+              qa_status = 'pending',
+              qa_summary = NULL,
+              execution_started_at = NOW(),
+              execution_finished_at = NULL,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [task.id]
+      );
+
+      await pool.query(
+        `
+          UPDATE agents
+          SET status = 'working',
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [agent.id]
+      );
+
+      const prompt = `
+Sos el ${agent.name} de Ingeniería del Sur.
+
+Estás corrigiendo una implementación existente dentro del mismo git worktree.
+
+TAREA ORIGINAL:
+${task.title}
+
+DESCRIPCIÓN ORIGINAL:
+${
+  task.description ||
+  "Sin descripción adicional."
+}
+
+OBSERVACIONES HUMANAS OBLIGATORIAS:
+${task.review_feedback}
+
+RESULTADO QA ANTERIOR:
+${
+  task.qa_summary ||
+  "No hay resultado QA disponible."
+}
+
+INSTRUCCIONES:
+- Revisá los cambios existentes antes de modificar.
+- Corregí específicamente las observaciones indicadas.
+- Conservá las partes que ya funcionan correctamente.
+- Trabajá solamente dentro del directorio asignado.
+- No cambies de rama.
+- No hagas commit, push, merge ni deploy.
+- No leas ni muestres archivos .env.
+- Ejecutá lint, tests o build cuando correspondan.
+- Informá qué corregiste y qué validaciones ejecutaste.
+`;
+
+      const correctionResult =
+        await executeCodex({
+          workingDirectory:
+            task.agent_working_path,
+          prompt,
+          sandbox: "workspace-write",
+        });
+
+      const gitStatus =
+        await getWorktreeStatus(
+          task.worktree_path
+        );
+
+      const correctionSummary = [
+        "",
+        "",
+        `=== CORRECCIÓN ${task.correction_count + 1} ===`,
+        correctionResult.output,
+        "",
+        "ESTADO DEL WORKTREE:",
+        gitStatus ||
+          "Sin cambios pendientes.",
+      ].join("\n");
+
+      const updatedTask =
+        await pool.query(
+          `
+            UPDATE tasks
+            SET status = 'review',
+                qa_status = 'pending',
+                review_feedback = NULL,
+                correction_count =
+                  correction_count + 1,
+                execution_finished_at = NOW(),
+                result_summary =
+                  COALESCE(
+                    result_summary,
+                    ''
+                  )
+                  || $2,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+          `,
+          [
+            task.id,
+            correctionSummary.slice(
+              -15000
+            ),
+          ]
+        );
+
+      await pool.query(
+        `
+          UPDATE agents
+          SET status = 'idle',
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [agent.id]
+      );
+
+      res.json(updatedTask.rows[0]);
+    } catch (error) {
+      console.error(
+        "Error corrigiendo tarea:",
+        error
+      );
+
+      await pool.query(
+        `
+          UPDATE tasks
+          SET status = 'review',
+              qa_status = 'failed',
+              result_summary =
+                COALESCE(
+                  result_summary,
+                  ''
+                )
+                || $2,
+              execution_finished_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [
+          req.params.id,
+          `\n\nERROR DE CORRECCIÓN:\n${error.message}`.slice(
+            -15000
+          ),
+        ]
+      );
+
+      if (agentId) {
+        await pool.query(
+          `
+            UPDATE agents
+            SET status = 'idle',
+                updated_at = NOW()
+            WHERE id = $1
+          `,
+          [agentId]
+        );
+      }
+
+      res.status(500).json({
+        status: "error",
+        message: error.message,
+      });
+    }
+  }
+);
+
+router.post(
   "/:id/approve",
   async (req, res) => {
     try {
