@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { existsSync } from "node:fs";
 import { pool } from "../db.js";
 import { executeCodex } from "../services/codex.service.js";
 import { runQaValidation } from "../services/qa.service.js";
@@ -103,6 +104,64 @@ router.post("/", async (req, res) => {
     });
   }
 });
+router.post(
+  "/:id/retry",
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `
+          UPDATE tasks
+          SET status = 'queued',
+              qa_status = 'pending',
+              qa_summary = NULL,
+              execution_started_at = NULL,
+              execution_finished_at = NULL,
+              result_summary =
+                COALESCE(
+                  result_summary,
+                  ''
+                )
+                || E'\\n\\nREINTENTO SOLICITADO:\\n'
+                || 'La tarea fue devuelta a la cola.',
+              updated_at = NOW()
+          WHERE id = $1
+            AND status = 'failed'
+          RETURNING *
+        `,
+        [req.params.id]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no existe o no está fallida",
+        });
+      }
+
+      await pool.query(`
+        UPDATE agents
+        SET status = 'idle',
+            updated_at = NOW()
+        WHERE status = 'working'
+      `);
+
+      res.json(result.rows[0]);
+    } catch (error) {
+      console.error(
+        "Error reintentando tarea:",
+        error
+      );
+
+      res.status(500).json({
+        status: "error",
+        message:
+          "No se pudo reintentar la tarea",
+      });
+    }
+  }
+);
+
 
 router.post("/:id/run", async (req, res) => {
   let agentId;
@@ -181,13 +240,39 @@ router.post("/:id/run", async (req, res) => {
      * El worktree se prepara antes de ejecutar
      * Codex. La carpeta principal no se modifica.
      */
-    worktree = await prepareTaskWorktree({
+const existingWorktreeIsValid =
+  task.worktree_path &&
+  task.agent_working_path &&
+  existsSync(task.worktree_path) &&
+  existsSync(task.agent_working_path);
+
+if (existingWorktreeIsValid) {
+  worktree = {
+    worktreeRoot:
+      task.worktree_path,
+    agentWorkingDirectory:
+      task.agent_working_path,
+    branchName:
+      task.branch_name,
+    baseBranch:
+      task.base_branch || "main",
+  };
+
+  console.log(
+    `Reutilizando worktree para tarea ${task.id}: ${task.worktree_path}`
+  );
+} else {
+  worktree =
+    await prepareTaskWorktree({
       taskId: task.id,
       targetDirectory,
-      branchName: task.branch_name,
+      branchName:
+        task.branch_name,
       baseBranch:
-        task.base_branch || "main",
+        task.base_branch ||
+        "main",
     });
+}
 
     await pool.query(
       `
@@ -255,6 +340,9 @@ REGLAS OBLIGATORIAS:
 - Conservá el stack y la estructura existente.
 - Ejecutá los tests o build correspondientes.
 - Al finalizar, informá archivos modificados, validaciones realizadas y riesgos pendientes.
+- Esta ejecución puede ser un reintento.
+- Revisá los cambios existentes antes de comenzar.
+- Conservá cualquier trabajo parcial que sea correcto.
 `;
 
     const result = await executeCodex({
