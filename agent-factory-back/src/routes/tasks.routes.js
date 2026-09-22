@@ -72,7 +72,7 @@ router.post("/", async (req, res) => {
           p.id,
           $2,
           $3,
-          $4,
+          $4::varchar,
           'queued',
           $5,
           COALESCE(
@@ -83,7 +83,7 @@ router.post("/", async (req, res) => {
         WHERE p.id = $1
           AND p.active = TRUE
           AND CASE
-            WHEN $4 = 'frontend'
+            WHEN $4::varchar = 'frontend'
               THEN p.frontend_path IS NOT NULL
                 AND TRIM(p.frontend_path) <> ''
             WHEN $4 IN ('backend', 'qa')
@@ -1012,7 +1012,7 @@ router.post(
                     result_summary,
                     ''
                   )
-                  || $4,
+                  || $4::varchar,
                 updated_at = NOW()
             WHERE id = $1
             RETURNING *
