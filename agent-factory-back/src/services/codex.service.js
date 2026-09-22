@@ -4,7 +4,11 @@ import path from "node:path";
 
 const MAX_EXECUTION_TIME = 15 * 60 * 1000;
 
-export function executeCodex({ workingDirectory, prompt }) {
+export function executeCodex({
+  workingDirectory,
+  prompt,
+  sandbox = "workspace-write",
+})  {
   return new Promise((resolve, reject) => {
     if (!path.isAbsolute(workingDirectory)) {
       reject(new Error("La ruta del proyecto no es absoluta"));
@@ -32,6 +36,19 @@ export function executeCodex({ workingDirectory, prompt }) {
       );
       return;
     }
+    const validSandboxes = [
+    "read-only",
+    "workspace-write",
+    ];
+
+    if (!validSandboxes.includes(sandbox)) {
+    reject(
+        new Error(
+        `Sandbox no permitido: ${sandbox}`
+        )
+    );
+    return;
+    }
 
     const child = spawn(
       "codex",
@@ -41,7 +58,7 @@ export function executeCodex({ workingDirectory, prompt }) {
         "never",
         "--ephemeral",
         "--sandbox",
-        "workspace-write",
+        sandbox,
         "--cd",
         resolvedDirectory,
         "-",

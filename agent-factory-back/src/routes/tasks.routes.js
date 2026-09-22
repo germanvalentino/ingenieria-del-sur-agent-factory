@@ -437,12 +437,15 @@ router.post(
         [qaAgent.id]
       );
 
-      const qaResult =
-        await runQaValidation({
-          workingDirectory:
-            task.agent_working_path,
-        });
-
+     
+     const qaResult =
+  await runQaValidation({
+    workingDirectory:
+      task.agent_working_path,
+    taskTitle: task.title,
+    taskDescription:
+      task.description,
+  });   
       const updatedTask =
         await pool.query(
           `
