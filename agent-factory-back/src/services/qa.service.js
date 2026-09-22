@@ -1,4 +1,7 @@
-import { execFile } from "node:child_process";
+import {
+  execFile,
+  spawn,
+} from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +11,15 @@ const execFileAsync = promisify(execFile);
 
 const MAX_COMMAND_TIME = 5 * 60 * 1000;
 const MAX_COMMAND_BUFFER = 10 * 1024 * 1024;
+const NODE_SYNTAX_EXTENSIONS = new Set([
+  ".js",
+  ".mjs",
+  ".cjs",
+]);
+const EXCLUDED_CHECK_DIRECTORIES = new Set([
+  "node_modules",
+  "dist",
+]);
 const ALLOWED_ROOT = path.resolve(
   "C:/proyectos"
 );
@@ -130,6 +142,146 @@ async function executeNpmCi(workingDirectory) {
   }
 }
 
+async function collectNodeSyntaxFiles(
+  directory
+) {
+  const entries = await fs.readdir(directory, {
+    withFileTypes: true,
+  });
+  const files = [];
+
+  for (const entry of entries) {
+    const entryPath = path.join(
+      directory,
+      entry.name
+    );
+
+    if (entry.isDirectory()) {
+      if (
+        EXCLUDED_CHECK_DIRECTORIES.has(
+          entry.name
+        )
+      ) {
+        continue;
+      }
+
+      files.push(
+        ...(await collectNodeSyntaxFiles(
+          entryPath
+        ))
+      );
+      continue;
+    }
+
+    if (
+      entry.isFile() &&
+      NODE_SYNTAX_EXTENSIONS.has(
+        path.extname(entry.name)
+      )
+    ) {
+      files.push(entryPath);
+    }
+  }
+
+  return files;
+}
+
+function runNodeCheck(filePath, cwd) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      ["--check", filePath],
+      {
+        cwd,
+        shell: false,
+        windowsHide: true,
+      }
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    child.on("error", (error) => {
+      resolve({
+        status: "failed",
+        output: error.message,
+      });
+    });
+
+    child.on("close", (code) => {
+      const output = [stdout, stderr]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+      resolve({
+        status:
+          code === 0 ? "passed" : "failed",
+        output,
+      });
+    });
+  });
+}
+
+async function executeNodeSyntaxCheck(
+  workingDirectory
+) {
+  const srcPath = path.join(
+    workingDirectory,
+    "src"
+  );
+
+  if (!(await pathExists(srcPath))) {
+    return {
+      script: "node --check",
+      status: "passed",
+      output: "NODE_SYNTAX_CHECK: PASSED",
+    };
+  }
+
+  const files =
+    await collectNodeSyntaxFiles(srcPath);
+
+  for (const file of files) {
+    const result = await runNodeCheck(
+      file,
+      workingDirectory
+    );
+
+    if (result.status === "failed") {
+      const relativeFile = path.relative(
+        workingDirectory,
+        file
+      );
+
+      return {
+        script: "node --check",
+        status: "failed",
+        output: [
+          `Archivo: ${relativeFile}`,
+          result.output,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      };
+    }
+  }
+
+  return {
+    script: "node --check",
+    status: "passed",
+    output: "NODE_SYNTAX_CHECK: PASSED",
+  };
+}
+
 async function pathExists(targetPath) {
   try {
     await fs.access(targetPath);
@@ -180,6 +332,10 @@ async function hasInstalledDependencies(
 }
 
 function formatCommandLabel(script) {
+  if (script === "node --check") {
+    return "node --check src";
+  }
+
   if (script === "npm ci") {
     return "npm ci";
   }
@@ -501,62 +657,69 @@ export async function runQaValidation({
       )
   );
 
-  if (scriptsToRun.length === 0) {
-    throw new Error(
-      "El proyecto no tiene scripts lint, test o build"
-    );
-  }
-
   const results = [];
-  const dependenciesResult =
-    await ensureDependencies(
-      safeDirectory
+  const usingNodeSyntaxCheck =
+    scriptsToRun.length === 0;
+
+  if (usingNodeSyntaxCheck) {
+    results.push(
+      await executeNodeSyntaxCheck(
+        safeDirectory
+      )
     );
+  } else {
+    const dependenciesResult =
+      await ensureDependencies(
+        safeDirectory
+      );
 
-  if (dependenciesResult) {
-    results.push(dependenciesResult);
+    if (dependenciesResult) {
+      results.push(dependenciesResult);
 
-    if (
-      dependenciesResult.status ===
-      "failed"
-    ) {
-      const commandsSummary = results
-        .map(
-          (result) =>
-            [
-              `=== ${formatCommandLabel(result.script)} ===`,
-              `RESULTADO: ${result.status.toUpperCase()}`,
-              result.output,
-            ].join("\n")
-        )
-        .join("\n\n");
+      if (
+        dependenciesResult.status ===
+        "failed"
+      ) {
+        const commandsSummary = results
+          .map(
+            (result) =>
+              [
+                `=== ${formatCommandLabel(result.script)} ===`,
+                `RESULTADO: ${result.status.toUpperCase()}`,
+                result.output,
+              ].join("\n")
+          )
+          .join("\n\n");
 
-      return {
-        status: "failed",
-        summary: commandsSummary,
-        results,
-      };
+        return {
+          status: "failed",
+          summary: commandsSummary,
+          results,
+        };
+      }
     }
   }
 
-  for (const script of scriptsToRun) {
-    const result =
-      script === "lint"
-        ? await executeLintWithBaseline({
-            workingDirectory:
-              safeDirectory,
-            baseBranch,
-          })
-        : await executeNpmScript({
-            script,
-            workingDirectory:
-              safeDirectory,
-          });
+  if (!usingNodeSyntaxCheck) {
+    for (const script of scriptsToRun) {
+      const result =
+        script === "lint"
+          ? await executeLintWithBaseline({
+              workingDirectory:
+                safeDirectory,
+              baseBranch,
+            })
+          : await executeNpmScript({
+              script,
+              workingDirectory:
+                safeDirectory,
+            });
 
-    results.push(result);
+      results.push(result);
 
-    if (result.status === "failed") {
-      break;
+      if (result.status === "failed") {
+        break;
+      }
     }
   }
 
@@ -584,6 +747,12 @@ export async function runQaValidation({
       results,
     };
   }
+
+  const validationsMessage =
+    usingNodeSyntaxCheck
+      ? "Considerá que node --check ya finalizó correctamente."
+      : "Considerá que lint y build ya finalizaron correctamente.";
+
   const gitChanges =
   await getGitChanges(safeDirectory);
 
@@ -617,7 +786,7 @@ INSTRUCCIONES:
 - No modifiques archivos.
 - No hagas commit, push, merge ni deploy.
 - Buscá errores lógicos, regresiones, problemas de seguridad y criterios incumplidos.
-- Considerá que lint y build ya finalizaron correctamente.
+- ${validationsMessage}
 - No rechaces por preferencias estéticas menores.
 - Si encontrás un problema real, emití QA_FAIL.
 - Si no encontrás problemas bloqueantes, emití QA_PASS.
