@@ -70,7 +70,7 @@ function formatUpdateTime(date) {
 function getErrorMessage(error) {
   return error instanceof Error
     ? error.message
-    : "OcurriÃ³ un error inesperado";
+    : "Ocurrió un error inesperado";
 }
 
 function createDashboardStore() {
@@ -309,6 +309,33 @@ function App() {
       setRunningTaskId(null);
     }
   }
+
+  async function retryTask(taskId) {
+    try {
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/tasks/${taskId}/retry`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            "No se pudo reintentar la tarea"
+        );
+      }
+
+      await loadDashboard();
+    } catch (err) {
+      setError(getErrorMessage(err));
+    }
+  }
+
 async function runQa(taskId) {
   try {
     setQaTaskId(taskId);
@@ -806,6 +833,20 @@ async function correctTask(taskId) {
                             >
                               <Play size={14} />
                               Ejecutar
+                            </button>
+                          )}
+
+                          {task.status ===
+                            "failed" && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                retryTask(task.id)
+                              }
+                              className="flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400"
+                            >
+                              <LoaderCircle size={14} />
+                              Reintentar
                             </button>
                           )}
 
