@@ -68,16 +68,30 @@ router.post("/", async (req, res) => {
           branch_name,
           base_branch
         )
-        VALUES (
-          $1,
+        SELECT
+          p.id,
           $2,
           $3,
           $4,
           'queued',
           $5,
-          'main'
-        )
-        RETURNING *
+          COALESCE(
+            NULLIF(TRIM(p.default_branch), ''),
+            'main'
+          )
+        FROM projects p
+        WHERE p.id = $1
+          AND p.active = TRUE
+          AND CASE
+            WHEN $4 = 'frontend'
+              THEN p.frontend_path IS NOT NULL
+                AND TRIM(p.frontend_path) <> ''
+            WHEN $4 IN ('backend', 'qa')
+              THEN p.backend_path IS NOT NULL
+                AND TRIM(p.backend_path) <> ''
+            ELSE FALSE
+          END
+        RETURNING tasks.*
       `,
       [
         projectId,
@@ -90,6 +104,14 @@ router.post("/", async (req, res) => {
         ),
       ]
     );
+
+    if (result.rowCount === 0) {
+      return res.status(400).json({
+        status: "error",
+        message:
+          "El proyecto no existe, está inactivo o no tiene configurada la ruta requerida para el agente",
+      });
+    }
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -104,6 +126,8 @@ router.post("/", async (req, res) => {
     });
   }
 });
+
+
 router.post(
   "/:id/retry",
   async (req, res) => {
