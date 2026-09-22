@@ -10,6 +10,8 @@ import {
   Play,
   RefreshCw,
   ShieldCheck,
+  MessageSquareWarning,
+  Wrench,
 } from "lucide-react";
 
 const API_URL =
@@ -185,6 +187,10 @@ function App() {
   const [runningTaskId, setRunningTaskId] =
     useState(null);
   const [qaTaskId, setQaTaskId] = useState(null);
+  const [
+  correctionTaskId,
+  setCorrectionTaskId,
+] = useState(null);
   const {
     dashboard,
     loading,
@@ -342,6 +348,89 @@ async function runQa(taskId) {
     await loadDashboard();
   } finally {
     setQaTaskId(null);
+  }
+}
+
+async function rejectTask(taskId) {
+  const notes = window.prompt(
+    "Escribí las observaciones que deberá corregir el agente:"
+  );
+
+  if (!notes?.trim()) {
+    return;
+  }
+
+  try {
+    setError("");
+
+    const response = await fetch(
+      `${API_URL}/tasks/${taskId}/reject`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
+        body: JSON.stringify({
+          notes: notes.trim(),
+        }),
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message ||
+          "No se pudo rechazar la tarea"
+      );
+    }
+
+    await loadDashboard();
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function correctTask(taskId) {
+  try {
+    setCorrectionTaskId(taskId);
+    setError("");
+
+    setDashboard((current) => ({
+      ...current,
+      tasks: current.tasks.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: "running",
+            }
+          : task
+      ),
+    }));
+
+    const response = await fetch(
+      `${API_URL}/tasks/${taskId}/correct`,
+      {
+        method: "POST",
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message ||
+          "No se pudo corregir la tarea"
+      );
+    }
+
+    await loadDashboard();
+  } catch (err) {
+    setError(err.message);
+    await loadDashboard();
+  } finally {
+    setCorrectionTaskId(null);
   }
 }
   async function approveTask(taskId) {
@@ -683,6 +772,19 @@ async function runQa(taskId) {
                               </pre>
                             </details>
                           )}
+
+                          {task.review_feedback && (
+                            <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                              <div className="flex items-center gap-2 text-xs font-semibold text-amber-300">
+                                <MessageSquareWarning size={14} />
+                                Observaciones humanas
+                              </div>
+
+                              <p className="mt-2 whitespace-pre-wrap text-sm text-amber-100">
+                                {task.review_feedback}
+                              </p>
+                            </div>
+                          )}
                         </div>
 
                         <div className="flex shrink-0 flex-col items-end gap-3">
@@ -707,45 +809,80 @@ async function runQa(taskId) {
                             </button>
                           )}
 
-                    {task.status === "review" &&
-                      task.qa_status !== "running" &&
-                      task.qa_status !== "passed" && (
-                        <button
-                          type="button"
-                          onClick={() => runQa(task.id)}
-                          disabled={qaTaskId !== null}
-                          className="flex items-center gap-2 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
-                        >
-                          <ShieldCheck size={14} />
+{task.status === "review" &&
+  !task.review_feedback &&
+  task.qa_status !== "running" &&
+  task.qa_status !== "passed" && (
+    <button
+      type="button"
+      onClick={() => runQa(task.id)}
+      disabled={qaTaskId !== null}
+      className="flex items-center gap-2 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
+    >
+      <ShieldCheck size={14} />
 
-                          {task.qa_status === "failed"
-                            ? "Reintentar QA"
-                            : "Ejecutar QA"}
-                        </button>
-                      )}
+      {task.qa_status === "failed"
+        ? "Reintentar QA"
+        : "Ejecutar QA"}
+    </button>
+  )}
 
-                    {task.status === "review" &&
-                      task.qa_status === "running" && (
-                        <span className="flex items-center gap-2 text-xs text-violet-300">
-                          <LoaderCircle
-                            size={15}
-                            className="animate-spin"
-                          />
-                          QA ejecutando
-                        </span>
-                      )}
+{task.status === "review" &&
+  task.qa_status === "running" && (
+    <span className="flex items-center gap-2 text-xs text-violet-300">
+      <LoaderCircle
+        size={15}
+        className="animate-spin"
+      />
+      QA ejecutando
+    </span>
+  )}
 
-                    {task.status === "review" &&
-                      task.qa_status === "passed" && (
-                        <button
-                          type="button"
-                          onClick={() => approveTask(task.id)}
-                          className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
-                        >
-                          <CheckCircle2 size={14} />
-                          Aprobar
-                        </button>
-                      )}
+{task.status === "review" &&
+  !task.review_feedback &&
+  task.qa_status === "passed" && (
+    <button
+      type="button"
+      onClick={() =>
+        approveTask(task.id)
+      }
+      className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+    >
+      <CheckCircle2 size={14} />
+      Aprobar
+    </button>
+  )}
+
+{task.status === "review" &&
+  !task.review_feedback && (
+    <button
+      type="button"
+      onClick={() =>
+        rejectTask(task.id)
+      }
+      className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-500/20"
+    >
+      <MessageSquareWarning size={14} />
+      Rechazar
+    </button>
+  )}
+
+{task.status === "review" &&
+  task.review_feedback && (
+    <button
+      type="button"
+      onClick={() =>
+        correctTask(task.id)
+      }
+      disabled={
+        correctionTaskId !== null
+      }
+      className="flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
+    >
+      <Wrench size={14} />
+      Corregir con agente
+    </button>
+  )}
 
                           {task.status ===
                             "running" && (
