@@ -516,6 +516,68 @@ router.post(
   }
 );
 
+router.post(
+  "/:id/reject",
+  async (req, res) => {
+    const notes =
+      req.body?.notes?.trim();
+
+    if (!notes) {
+      return res.status(400).json({
+        status: "error",
+        message:
+          "Las observaciones son obligatorias",
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `
+          UPDATE tasks
+          SET qa_status = 'failed',
+              review_feedback = $2,
+              rejected_at = NOW(),
+              result_summary =
+                COALESCE(
+                  result_summary,
+                  ''
+                )
+                || $3,
+              updated_at = NOW()
+          WHERE id = $1
+            AND status = 'review'
+          RETURNING *
+        `,
+        [
+          req.params.id,
+          notes,
+          `\n\nRECHAZO HUMANO:\n${notes}`,
+        ]
+      );
+
+      if (result.rowCount === 0) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea no existe o no está en revisión",
+        });
+      }
+
+      res.json(result.rows[0]);
+    } catch (error) {
+      console.error(
+        "Error rechazando tarea:",
+        error
+      );
+
+      res.status(500).json({
+        status: "error",
+        message:
+          "No se pudo rechazar la tarea",
+      });
+    }
+  }
+);
 
 router.post(
   "/:id/approve",
