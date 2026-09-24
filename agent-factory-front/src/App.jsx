@@ -1,4 +1,10 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Bot,
   CheckCircle2,
@@ -46,6 +52,7 @@ const initialDashboardState = {
   loading: true,
   error: "",
   lastUpdateTime: "",
+  initialized: false,
 };
 
 const fallbackAgentOptions = [
@@ -477,6 +484,7 @@ function createDashboardStore() {
         ...current,
         dashboard: data,
         loading: false,
+        initialized: true,
         lastUpdateTime: formatUpdateTime(new Date()),
       }));
     } catch (error) {
@@ -563,10 +571,14 @@ function App() {
     loading,
     error,
     lastUpdateTime,
+    initialized,
   } = useSyncExternalStore(
     dashboardStore.subscribe,
     dashboardStore.getSnapshot
   );
+  const queueListRef = useRef(null);
+  const taskCardRefs = useRef(new Map());
+  const pendingQueuePositionRef = useRef(null);
   const selectedProjectId =
     form.projectId || dashboard.projects[0]?.id || "";
   const agentOptions = getAgentOptions(dashboard.agents);
@@ -580,6 +592,64 @@ function App() {
     dashboard.tasks.some(
       (task) => task.auto_correction_active
     );
+  const showInitialLoading = loading && !initialized;
+
+  function rememberQueuePosition(taskId = null) {
+    pendingQueuePositionRef.current = {
+      taskId,
+      scrollTop: queueListRef.current?.scrollTop ?? 0,
+    };
+  }
+
+  function refreshDashboard() {
+    rememberQueuePosition();
+    return loadDashboard();
+  }
+
+  function setTaskCardRef(taskId, node) {
+    if (node) {
+      taskCardRefs.current.set(taskId, node);
+      return;
+    }
+
+    taskCardRefs.current.delete(taskId);
+  }
+
+  useLayoutEffect(() => {
+    const pendingPosition = pendingQueuePositionRef.current;
+    const queueList = queueListRef.current;
+
+    if (!pendingPosition || !queueList) {
+      return;
+    }
+
+    pendingQueuePositionRef.current = null;
+    queueList.scrollTop = pendingPosition.scrollTop;
+
+    if (!pendingPosition.taskId) {
+      return;
+    }
+
+    const taskCard = taskCardRefs.current.get(
+      pendingPosition.taskId,
+    );
+
+    if (!taskCard) {
+      return;
+    }
+
+    const visibleTop = queueList.scrollTop;
+    const visibleBottom = visibleTop + queueList.clientHeight;
+    const cardTop = taskCard.offsetTop;
+    const cardBottom = cardTop + taskCard.offsetHeight;
+
+    if (cardTop < visibleTop) {
+      queueList.scrollTop = cardTop;
+    } else if (cardBottom > visibleBottom) {
+      queueList.scrollTop =
+        cardBottom - queueList.clientHeight;
+    }
+  }, [dashboard.tasks]);
 
   useEffect(() => {
     if (!hasActiveAutomaticCycle) {
@@ -587,6 +657,7 @@ function App() {
     }
 
     const intervalId = window.setInterval(() => {
+      rememberQueuePosition();
       loadDashboard();
     }, 2500);
 
@@ -710,6 +781,7 @@ function App() {
 
   async function runTask(taskId) {
     try {
+      rememberQueuePosition(taskId);
       setRunningTaskId(taskId);
       setError("");
 
@@ -752,6 +824,7 @@ function App() {
 
   async function retryTask(taskId) {
     try {
+      rememberQueuePosition(taskId);
       setError("");
 
       const response = await fetch(
@@ -778,6 +851,7 @@ function App() {
 
 async function runQa(taskId) {
   try {
+    rememberQueuePosition(taskId);
     setQaTaskId(taskId);
     setError("");
 
@@ -832,6 +906,7 @@ async function rejectTask(taskId) {
   }
 
   try {
+    rememberQueuePosition(taskId);
     setError("");
 
     const response = await fetch(
@@ -865,6 +940,7 @@ async function rejectTask(taskId) {
 
 async function correctTask(taskId) {
   try {
+    rememberQueuePosition(taskId);
     setCorrectionTaskId(taskId);
     setError("");
 
@@ -906,6 +982,7 @@ async function correctTask(taskId) {
 }
   async function approveTask(taskId) {
   try {
+    rememberQueuePosition(taskId);
     setError("");
 
     const response = await fetch(
@@ -972,7 +1049,7 @@ async function correctTask(taskId) {
 
             <button
               type="button"
-              onClick={loadDashboard}
+              onClick={refreshDashboard}
               disabled={loading}
               className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-200 transition hover:border-sky-400/50 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -1033,7 +1110,7 @@ async function correctTask(taskId) {
           </div>
         )}
 
-        {loading ? (
+        {showInitialLoading ? (
           <p className="text-slate-400">
             Cargando dashboard...
           </p>
@@ -1077,10 +1154,10 @@ async function correctTask(taskId) {
               />
             </section>
 
-            <section className="mt-8 grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
+            <section className="mt-8 grid items-start gap-6 lg:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
               <form
                 onSubmit={handleSubmit}
-                className="rounded-2xl border border-white/10 bg-white/5 p-6"
+                className="rounded-2xl border border-white/10 bg-white/5 p-6 lg:sticky lg:top-6"
               >
                 <div className="flex items-center gap-2">
                   <CirclePlus
@@ -1181,12 +1258,17 @@ async function correctTask(taskId) {
                 </div>
               </form>
 
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-                <h3 className="text-lg font-semibold text-white">
-                  Cola de trabajo
-                </h3>
+              <div className="flex max-h-[calc(100vh-220px)] min-h-[320px] min-w-0 flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/5">
+                <div className="shrink-0 border-b border-white/10 bg-slate-950/80 px-6 py-5">
+                  <h3 className="text-lg font-semibold text-white">
+                    Cola de trabajo
+                  </h3>
+                </div>
 
-                <div className="mt-5 space-y-3">
+                <div
+                  ref={queueListRef}
+                  className="min-h-0 flex-1 space-y-3 overflow-y-auto px-6 py-5"
+                >
                   {dashboard.tasks.length === 0 && (
                     <div className="rounded-xl border border-dashed border-white/10 py-10 text-center text-sm text-slate-500">
                       Todavía no hay tareas.
@@ -1196,9 +1278,12 @@ async function correctTask(taskId) {
                   {dashboard.tasks.map((task) => (
                     <article
                       key={task.id}
+                      ref={(node) =>
+                        setTaskCardRef(task.id, node)
+                      }
                       className="rounded-xl border border-white/10 bg-slate-950/50 p-4"
                     >
-                      <div className="flex items-start justify-between gap-4">
+                      <div className="flex flex-col items-stretch gap-4 xl:flex-row xl:items-start xl:justify-between">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span
@@ -1637,7 +1722,7 @@ async function correctTask(taskId) {
                             })()}
                         </div>
 
-                        <div className="flex shrink-0 flex-col items-end gap-3">
+                        <div className="flex shrink-0 flex-row flex-wrap items-center gap-3 xl:flex-col xl:items-end">
                           <span className="text-xs text-slate-500">
                             {task.project_name}
                           </span>
@@ -1835,7 +1920,7 @@ async function correctTask(taskId) {
             </section>
           </>
         )}
-        <ProjectManager onProjectsChanged={loadDashboard} />
+        <ProjectManager onProjectsChanged={refreshDashboard} />
       </main>
 
       <footer className="mt-10 border-t border-white/10 py-6 text-center text-sm text-slate-500">
