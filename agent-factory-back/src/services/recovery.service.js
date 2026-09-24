@@ -19,6 +19,8 @@ export async function recoverInterruptedTasks() {
             COALESCE(result_summary, '')
             || E'\\n\\nRECUPERACIÓN AUTOMÁTICA:\\n'
             || 'La ejecución fue interrumpida por un reinicio del backend.',
+          auto_correction_active = FALSE,
+          auto_correction_stage = NULL,
           execution_finished_at = NOW(),
           qa_finished_at =
             CASE

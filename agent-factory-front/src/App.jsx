@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   Bot,
   CheckCircle2,
@@ -405,6 +405,35 @@ function getErrorMessage(error) {
     : "Ocurrió un error inesperado";
 }
 
+function getCorrectionAttempts(task) {
+  return Number(
+    task.correction_attempts ??
+      task.correction_count ??
+      0
+  );
+}
+
+function getFinishedAutomaticCorrections(task) {
+  return Number(
+    task.auto_correction_finished_count ??
+      task.correction_attempts ??
+      0
+  );
+}
+
+function getAutomaticCycleLabel(task) {
+  const nextAttempt = Math.min(
+    getCorrectionAttempts(task) + 1,
+    3
+  );
+
+  if (task.auto_correction_stage === "correction") {
+    return `Corrigiendo automaticamente (intento ${nextAttempt} de 3)`;
+  }
+
+  return `Ejecutando QA (intento ${nextAttempt} de 3)`;
+}
+
 function createDashboardStore() {
   let dashboardState = initialDashboardState;
   const listeners = new Set();
@@ -547,6 +576,22 @@ function App() {
   const setError = (message) => {
     dashboardStore.setError(message);
   };
+  const hasActiveAutomaticCycle =
+    dashboard.tasks.some(
+      (task) => task.auto_correction_active
+    );
+
+  useEffect(() => {
+    if (!hasActiveAutomaticCycle) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      loadDashboard();
+    }, 2500);
+
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveAutomaticCycle, loadDashboard]);
 
   async function toggleTaskHistory(taskId) {
     const shouldOpen = openHistoryTaskId !== taskId;
@@ -743,6 +788,10 @@ async function runQa(taskId) {
           ? {
               ...task,
               qa_status: "running",
+              auto_correction_active: true,
+              auto_correction_stage: "qa",
+              auto_correction_finished_count: 0,
+              correction_attempts: 0,
             }
           : task
       ),
@@ -1167,13 +1216,20 @@ async function correctTask(taskId) {
                               {task.assigned_role}
                             </span>
 
-                            {Number(task.correction_count) > 0 && (
+                            {getCorrectionAttempts(task) > 0 && (
                               <span className="text-xs text-amber-300">
                                 {Number(
-                                  task.correction_count,
+                                  getCorrectionAttempts(task),
                                 ) === 1
                                   ? "1 corrección"
-                                  : `${task.correction_count} correcciones`}
+                                  : `${getCorrectionAttempts(task)} correcciones`}
+                              </span>
+                            )}
+
+                            {getFinishedAutomaticCorrections(task) > 0 && (
+                              <span className="text-xs text-cyan-300">
+                                Automaticas:{" "}
+                                {getFinishedAutomaticCorrections(task)}
                               </span>
                             )}
                           </div>
@@ -1189,6 +1245,27 @@ async function correctTask(taskId) {
                           <p className="mt-3 break-all text-xs text-slate-600">
                             {task.branch_name}
                           </p>
+
+                          {task.auto_correction_active && (
+                            <div className="mt-3 flex items-center gap-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200">
+                              <LoaderCircle
+                                size={14}
+                                className="animate-spin"
+                              />
+                              {getAutomaticCycleLabel(task)}
+                            </div>
+                          )}
+
+                          {!task.auto_correction_active &&
+                            task.qa_summary &&
+                            ["passed", "failed"].includes(
+                              task.qa_status,
+                            ) && (
+                              <p className="mt-3 text-xs text-cyan-300">
+                                Correcciones automaticas realizadas:{" "}
+                                {getFinishedAutomaticCorrections(task)}
+                              </p>
+                            )}
 
                           {task.result_summary && (
                             <details className="mt-4 rounded-lg border border-white/10 bg-black/20 p-3">
@@ -1602,7 +1679,10 @@ async function correctTask(taskId) {
                               onClick={() =>
                                 retryTask(task.id)
                               }
-                              className="flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400"
+                              disabled={
+                                hasActiveAutomaticCycle
+                              }
+                              className="flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
                             >
                               <LoaderCircle size={14} />
                               Reintentar
@@ -1616,7 +1696,10 @@ async function correctTask(taskId) {
     <button
       type="button"
       onClick={() => runQa(task.id)}
-      disabled={qaTaskId !== null}
+      disabled={
+        qaTaskId !== null ||
+        hasActiveAutomaticCycle
+      }
       className="flex items-center gap-2 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
     >
       <ShieldCheck size={14} />
@@ -1634,7 +1717,9 @@ async function correctTask(taskId) {
         size={15}
         className="animate-spin"
       />
-      QA ejecutando
+      {task.auto_correction_active
+        ? getAutomaticCycleLabel(task)
+        : "QA ejecutando"}
     </span>
   )}
 
@@ -1646,7 +1731,10 @@ async function correctTask(taskId) {
       onClick={() =>
         approveTask(task.id)
       }
-      className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+      disabled={
+        hasActiveAutomaticCycle
+      }
+      className="flex items-center gap-2 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
     >
       <CheckCircle2 size={14} />
       Aprobar
@@ -1675,7 +1763,8 @@ async function correctTask(taskId) {
         correctTask(task.id)
       }
       disabled={
-        correctionTaskId !== null
+        correctionTaskId !== null ||
+        hasActiveAutomaticCycle
       }
       className="flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-50"
     >

@@ -24,6 +24,8 @@ const VALID_ROLES = [
   "qa",
 ];
 
+const MAX_AUTOMATIC_CORRECTIONS = 3;
+
 function buildAllowedPathsPrompt({
   assignedRole,
   frontendWorkingDirectory,
@@ -55,6 +57,296 @@ function createBranchName(role, title) {
     .slice(0, 60);
 
   return `feature/${role}-${Date.now()}-${slug}`;
+}
+
+function getQaProjectDirectories(task) {
+  if (task.assigned_role !== "fullstack") {
+    return null;
+  }
+
+  return [
+    {
+      label: "FRONTEND",
+      directory: task.frontend_working_path,
+    },
+    {
+      label: "BACKEND",
+      directory: task.backend_working_path,
+    },
+  ];
+}
+
+function normalizeQaFindings(summary) {
+  const qaReview = String(summary || "")
+    .split("=== REVISIÃ“N DE CÃ“DIGO CODEX ===")
+    .pop();
+  const findingsMatch = qaReview.match(
+    /HALLAZGOS:\s*([\s\S]*?)(?:\n\s*RIESGOS:|$)/i
+  );
+  const comparableText =
+    findingsMatch?.[1] || qaReview;
+
+  return comparableText
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildCorrectionPrompt({
+  agent,
+  task,
+  qaSummary,
+  attemptNumber,
+}) {
+  const allowedPathsPrompt =
+    buildAllowedPathsPrompt({
+      assignedRole: task.assigned_role,
+      frontendWorkingDirectory:
+        task.frontend_working_path,
+      backendWorkingDirectory:
+        task.backend_working_path,
+      agentWorkingDirectory:
+        task.agent_working_path,
+    });
+
+  return `
+Sos el ${agent.name} de IngenierÃ­a del Sur.
+
+EstÃ¡s corrigiendo una implementaciÃ³n existente dentro del mismo git worktree y la misma rama.
+
+INTENTO DE CORRECCIÃ“N AUTOMÃTICA:
+${attemptNumber} de ${MAX_AUTOMATIC_CORRECTIONS}
+
+TAREA ORIGINAL:
+${task.title}
+
+DESCRIPCIÃ“N ORIGINAL:
+${
+  task.description ||
+  "Sin descripciÃ³n adicional."
+}
+
+RESULTADO COMPLETO DEL ÃšLTIMO QA:
+${qaSummary || "No hay resultado QA disponible."}
+
+INSTRUCCIONES:
+- RevisÃ¡ los cambios existentes antes de modificar.
+- CorregÃ­ solamente los hallazgos del QA.
+- ConservÃ¡ las partes que ya funcionan correctamente.
+- TrabajÃ¡ solamente dentro del directorio asignado.
+- MantenÃ© el mismo worktree y la misma rama.
+- No cambies de rama.
+${allowedPathsPrompt}
+
+- No hagas commit, push, merge ni deploy.
+- No leas ni muestres archivos .env.
+- EjecutÃ¡ lint, tests o build cuando correspondan.
+- InformÃ¡ archivos modificados, validaciones realizadas y riesgos pendientes.
+`;
+}
+
+async function runQaAttempt({
+  task,
+  qaAgent,
+  attemptNumber,
+}) {
+  let executionId;
+
+  await pool.query(
+    `
+      UPDATE tasks
+      SET qa_status = 'running',
+          auto_correction_stage = 'qa',
+          qa_started_at = NOW(),
+          qa_finished_at = NULL,
+          qa_summary = NULL,
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [task.id]
+  );
+
+  const execution = await startTaskExecution({
+    taskId: task.id,
+    agentId: qaAgent.id,
+    executionType: "qa",
+    provider: qaAgent.provider,
+  });
+
+  executionId = execution.id;
+
+  try {
+    const qaResult = await runQaValidation({
+      workingDirectory: task.agent_working_path,
+      projectDirectories:
+        getQaProjectDirectories(task),
+      baseBranch: task.base_branch || "main",
+      taskTitle: task.title,
+      taskDescription: task.description,
+      correctionFeedback:
+        task.correction_feedback,
+    });
+
+    const finalSummary = [
+      `QA automÃ¡tico intento ${attemptNumber}`,
+      "",
+      qaResult.summary,
+    ].join("\n");
+
+    const updatedTaskResult =
+      await pool.query(
+        `
+          UPDATE tasks
+          SET status = 'review',
+              qa_status = $2,
+              qa_summary = $3,
+              qa_finished_at = NOW(),
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+        `,
+        [
+          task.id,
+          qaResult.status,
+          finalSummary.slice(-15000),
+        ]
+      );
+
+    await finishTaskExecution({
+      executionId,
+      status: qaResult.status,
+      usage: qaResult.codexUsage,
+      model: qaResult.codexModel,
+    });
+
+    return {
+      task: updatedTaskResult.rows[0],
+      qaResult: {
+        ...qaResult,
+        summary: finalSummary,
+      },
+    };
+  } catch (error) {
+    await finishTaskExecution({
+      executionId,
+      status: "failed",
+      errorMessage: error.message,
+    });
+
+    throw error;
+  }
+}
+
+async function runCorrectionAttempt({
+  task,
+  agent,
+  qaSummary,
+  attemptNumber,
+  statusBeforeCorrection,
+}) {
+  let executionId;
+
+  await pool.query(
+    `
+      UPDATE tasks
+      SET status = 'running',
+          qa_status = 'pending',
+          auto_correction_stage = 'correction',
+          execution_started_at = NOW(),
+          execution_finished_at = NULL,
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [task.id]
+  );
+
+  const execution = await startTaskExecution({
+    taskId: task.id,
+    agentId: agent.id,
+    executionType: "correction",
+    provider: agent.provider,
+  });
+
+  executionId = execution.id;
+
+  try {
+    const correctionResult = await executeCodex({
+      workingDirectory: task.agent_working_path,
+      prompt: buildCorrectionPrompt({
+        agent,
+        task,
+        qaSummary,
+        attemptNumber,
+      }),
+      sandbox: "workspace-write",
+    });
+
+    const gitStatus = await getWorktreeStatus(
+      task.worktree_path
+    );
+    const leftChanges =
+      Boolean(gitStatus) &&
+      gitStatus !== statusBeforeCorrection;
+
+    const correctionSummary = [
+      "",
+      "",
+      `=== CORRECCIÃ“N AUTOMÃTICA ${attemptNumber} DE ${MAX_AUTOMATIC_CORRECTIONS} ===`,
+      correctionResult.output,
+      "",
+      "ESTADO DEL WORKTREE:",
+      gitStatus || "Sin cambios pendientes.",
+    ].join("\n");
+
+    const updatedTaskResult =
+      await pool.query(
+        `
+          UPDATE tasks
+          SET status = 'review',
+              qa_status = 'pending',
+              correction_feedback = $2,
+              correction_count = correction_count + 1,
+              correction_attempts = correction_attempts + 1,
+              auto_correction_finished_count =
+                auto_correction_finished_count + 1,
+              execution_finished_at = NOW(),
+              result_summary =
+                COALESCE(result_summary, '')
+                || $3,
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+        `,
+        [
+          task.id,
+          qaSummary.slice(-15000),
+          correctionSummary.slice(-15000),
+        ]
+      );
+
+    await finishTaskExecution({
+      executionId,
+      status: leftChanges ? "passed" : "failed",
+      usage: correctionResult.usage,
+      model: correctionResult.model,
+      errorMessage: leftChanges
+        ? null
+        : "La correcciÃ³n automÃ¡tica no dejÃ³ cambios nuevos.",
+    });
+
+    return {
+      task: updatedTaskResult.rows[0],
+      gitStatus,
+      leftChanges,
+    };
+  } catch (error) {
+    await finishTaskExecution({
+      executionId,
+      status: "failed",
+      errorMessage: error.message,
+    });
+
+    throw error;
+  }
 }
 
 router.post("/", async (req, res) => {
@@ -657,7 +949,8 @@ router.post(
   "/:id/qa",
   async (req, res) => {
     let qaAgentId;
-    let executionId;
+    let correctionAgentId;
+    let cycleStarted = false;
 
     try {
       const taskResult = await pool.query(
@@ -718,126 +1011,266 @@ router.post(
         });
       }
 
-      const agentResult = await pool.query(
-        `
-          SELECT *
-          FROM agents
-          WHERE role = 'qa'
-            AND active = TRUE
-          LIMIT 1
-        `
-      );
-
-      const qaAgent = agentResult.rows[0];
-
-      if (!qaAgent) {
+      if (task.auto_correction_active) {
         return res.status(409).json({
           status: "error",
           message:
-            "No existe un QA Agent activo",
+            "El ciclo automatico ya esta ejecutandose para esta tarea",
         });
       }
 
-      qaAgentId = qaAgent.id;
-
-      await pool.query(
+      const lockResult = await pool.query(
         `
           UPDATE tasks
-          SET qa_status = 'running',
-              qa_started_at = NOW(),
-              qa_finished_at = NULL,
-              qa_summary = NULL,
+          SET auto_correction_active = TRUE,
+              auto_correction_stage = 'qa',
+              auto_correction_finished_count = 0,
+              correction_attempts = 0,
               updated_at = NOW()
           WHERE id = $1
+            AND auto_correction_active = FALSE
+          RETURNING *
         `,
         [task.id]
       );
+
+      if (lockResult.rowCount === 0) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "El ciclo automatico ya esta ejecutandose para esta tarea",
+        });
+      }
+
+      cycleStarted = true;
+
+      const cycleAgentsResult = await pool.query(
+        `
+          SELECT *
+          FROM agents
+          WHERE role IN ('qa', $1)
+            AND active = TRUE
+        `,
+        [task.assigned_role]
+      );
+      const agentsByRole = new Map(
+        cycleAgentsResult.rows.map((agent) => [
+          agent.role,
+          agent,
+        ])
+      );
+      const cycleQaAgent = agentsByRole.get("qa");
+      const correctionAgent = agentsByRole.get(
+        task.assigned_role
+      );
+
+      if (!cycleQaAgent) {
+        throw new Error(
+          "No existe un QA Agent activo"
+        );
+      }
+
+      if (!correctionAgent) {
+        throw new Error(
+          "No existe un agente activo para corregir la tarea"
+        );
+      }
+
+      qaAgentId = cycleQaAgent.id;
+      correctionAgentId = correctionAgent.id;
 
       await pool.query(
         `
           UPDATE agents
           SET status = 'working',
               updated_at = NOW()
-          WHERE id = $1
+          WHERE id IN ($1, $2)
         `,
-        [qaAgent.id]
+        [cycleQaAgent.id, correctionAgent.id]
       );
 
-      const execution =
-        await startTaskExecution({
-          taskId: task.id,
-          agentId: qaAgent.id,
-          executionType: "qa",
-          provider: qaAgent.provider,
-        });
+      let currentTask = lockResult.rows[0];
+      let finalTask = currentTask;
+      let previousFindings = null;
+      let previousExecutionLeftChanges = Boolean(
+        await getWorktreeStatus(task.worktree_path)
+      );
 
-      executionId = execution.id;
+      for (
+        let qaAttempt = 1;
+        qaAttempt <= MAX_AUTOMATIC_CORRECTIONS + 1;
+        qaAttempt += 1
+      ) {
+        const qaAttemptResult =
+          await runQaAttempt({
+            task: currentTask,
+            qaAgent: cycleQaAgent,
+            attemptNumber: qaAttempt,
+          });
 
-     
-const qaResult =
-  await runQaValidation({
-    workingDirectory:
-      task.agent_working_path,
-    projectDirectories:
-      task.assigned_role === "fullstack"
-        ? [
-            {
-              label: "FRONTEND",
-              directory:
-                task.frontend_working_path,
-            },
-            {
-              label: "BACKEND",
-              directory:
-                task.backend_working_path,
-            },
-          ]
-        : null,
-    baseBranch:
-      task.base_branch || "main",
-    taskTitle: task.title,
-    taskDescription:
-      task.description,
-    correctionFeedback:
-      task.correction_feedback,
-  });
-      const updatedTask =
-        await pool.query(
-          `
-            UPDATE tasks
-            SET qa_status = $2,
-                qa_summary = $3,
-                qa_finished_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $1
-            RETURNING *
-          `,
-          [
-            task.id,
-            qaResult.status,
-            qaResult.summary.slice(-15000),
-          ]
-        );
+        currentTask = qaAttemptResult.task;
+        finalTask = currentTask;
 
-      await finishTaskExecution({
-        executionId,
-        status: qaResult.status,
-        usage: qaResult.codexUsage,
-        model: qaResult.codexModel,
-      });
-      executionId = null;
+        if (
+          qaAttemptResult.qaResult.status ===
+          "passed"
+        ) {
+          break;
+        }
+
+        const currentFindings =
+          normalizeQaFindings(
+            qaAttemptResult.qaResult.review ||
+              qaAttemptResult.qaResult.summary
+          );
+
+        if (
+          previousFindings &&
+          currentFindings === previousFindings
+        ) {
+          const repeatedSummary = [
+            currentTask.qa_summary,
+            "",
+            "CICLO AUTOMATICO DETENIDO:",
+            "QA devolvio exactamente los mismos hallazgos que en el intento anterior.",
+          ].join("\n");
+
+          const repeatedResult =
+            await pool.query(
+              `
+                UPDATE tasks
+                SET status = 'review',
+                    qa_status = 'failed',
+                    qa_summary = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *
+              `,
+              [
+                currentTask.id,
+                repeatedSummary.slice(-15000),
+              ]
+            );
+
+          finalTask = repeatedResult.rows[0];
+          break;
+        }
+
+        previousFindings = currentFindings;
+
+        if (
+          Number(currentTask.correction_attempts) >=
+          MAX_AUTOMATIC_CORRECTIONS
+        ) {
+          break;
+        }
+
+        if (!previousExecutionLeftChanges) {
+          const noChangesSummary = [
+            currentTask.qa_summary,
+            "",
+            "CICLO AUTOMATICO DETENIDO:",
+            "No se inicio una correccion porque la ejecucion anterior no dejo cambios.",
+          ].join("\n");
+
+          const noChangesResult =
+            await pool.query(
+              `
+                UPDATE tasks
+                SET status = 'review',
+                    qa_status = 'failed',
+                    qa_summary = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *
+              `,
+              [
+                currentTask.id,
+                noChangesSummary.slice(-15000),
+              ]
+            );
+
+          finalTask = noChangesResult.rows[0];
+          break;
+        }
+
+        const correctionAttempt =
+          Number(currentTask.correction_attempts) +
+          1;
+        const correctionAttemptResult =
+          await runCorrectionAttempt({
+            task: currentTask,
+            agent: correctionAgent,
+            qaSummary:
+              qaAttemptResult.qaResult.summary,
+            attemptNumber: correctionAttempt,
+            statusBeforeCorrection:
+              await getWorktreeStatus(
+                currentTask.worktree_path
+              ),
+          });
+
+        currentTask = correctionAttemptResult.task;
+        finalTask = currentTask;
+        previousExecutionLeftChanges =
+          correctionAttemptResult.leftChanges;
+      }
+
+      if (
+        finalTask.qa_status === "failed" &&
+        Number(finalTask.correction_attempts) >=
+          MAX_AUTOMATIC_CORRECTIONS
+      ) {
+        const maxAttemptsSummary = [
+          finalTask.qa_summary,
+          "",
+          "CICLO AUTOMATICO DETENIDO:",
+          `Se alcanzaron ${MAX_AUTOMATIC_CORRECTIONS} correcciones automaticas sin aprobar QA.`,
+        ].join("\n");
+
+        const maxAttemptsResult =
+          await pool.query(
+            `
+              UPDATE tasks
+              SET status = 'review',
+                  qa_status = 'failed',
+                  qa_summary = $2,
+                  updated_at = NOW()
+              WHERE id = $1
+              RETURNING *
+            `,
+            [
+              finalTask.id,
+              maxAttemptsSummary.slice(-15000),
+            ]
+          );
+
+        finalTask = maxAttemptsResult.rows[0];
+      }
 
       await pool.query(
         `
           UPDATE agents
           SET status = 'idle',
               updated_at = NOW()
-          WHERE id = $1
+          WHERE id IN ($1, $2)
         `,
-        [qaAgent.id]
+        [cycleQaAgent.id, correctionAgent.id]
       );
 
-      res.json(updatedTask.rows[0]);
+      const unlockedResult = await pool.query(
+        `
+          UPDATE tasks
+          SET auto_correction_active = FALSE,
+              auto_correction_stage = NULL,
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+        `,
+        [finalTask.id]
+      );
+
+      return res.json(unlockedResult.rows[0]);
     } catch (error) {
       console.error(
         "Error ejecutando QA:",
@@ -849,6 +1282,8 @@ const qaResult =
           UPDATE tasks
           SET qa_status = 'failed',
               qa_summary = $2,
+              auto_correction_active = FALSE,
+              auto_correction_stage = NULL,
               qa_finished_at = NOW(),
               updated_at = NOW()
           WHERE id = $1
@@ -859,12 +1294,6 @@ const qaResult =
         ]
       );
 
-      await finishTaskExecution({
-        executionId,
-        status: "failed",
-        errorMessage: error.message,
-      });
-
       if (qaAgentId) {
         await pool.query(
           `
@@ -874,6 +1303,34 @@ const qaResult =
             WHERE id = $1
           `,
           [qaAgentId]
+        );
+      }
+
+      if (
+        correctionAgentId &&
+        correctionAgentId !== qaAgentId
+      ) {
+        await pool.query(
+          `
+            UPDATE agents
+            SET status = 'idle',
+                updated_at = NOW()
+            WHERE id = $1
+          `,
+          [correctionAgentId]
+        );
+      }
+
+      if (cycleStarted) {
+        await pool.query(
+          `
+            UPDATE tasks
+            SET auto_correction_active = FALSE,
+                auto_correction_stage = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+          `,
+          [req.params.id]
         );
       }
 
