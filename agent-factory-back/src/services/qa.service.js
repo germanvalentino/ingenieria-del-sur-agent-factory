@@ -763,6 +763,12 @@ async function getGitChanges(
    * nuevos, sin agregarlos realmente al commit.
    */
   const MAX_DIFF_SIZE = 120000;
+  const repositoryRoot = validateDirectory(
+    await runGit(
+      ["rev-parse", "--show-toplevel"],
+      workingDirectory
+    )
+  );
   const [
     status,
     unstagedPathsResult,
@@ -771,7 +777,7 @@ async function getGitChanges(
   ] =
     await Promise.all([
       getGitStatusSnapshot(
-        workingDirectory
+        repositoryRoot
       ),
       runGit(
         [
@@ -779,7 +785,7 @@ async function getGitChanges(
           "--name-only",
           "--",
         ],
-        workingDirectory
+        repositoryRoot
       ),
       runGit(
         [
@@ -788,7 +794,7 @@ async function getGitChanges(
           "--name-only",
           "--",
         ],
-        workingDirectory
+        repositoryRoot
       ),
       runGit(
         [
@@ -796,17 +802,17 @@ async function getGitChanges(
           "--others",
           "--exclude-standard",
         ],
-        workingDirectory
+        repositoryRoot
       ),
     ]);
 
   const unstagedDiff = await getReviewDiff({
-    workingDirectory,
+    workingDirectory: repositoryRoot,
     cached: false,
     paths: unstagedPathsResult.split(/\r?\n/),
   });
   const stagedDiff = await getReviewDiff({
-    workingDirectory,
+    workingDirectory: repositoryRoot,
     cached: true,
     paths: stagedPathsResult.split(/\r?\n/),
   });
@@ -818,7 +824,7 @@ async function getGitChanges(
     .join("\n\n");
   const untrackedDiff =
     await buildUntrackedFilesDiff({
-      workingDirectory,
+      workingDirectory: repositoryRoot,
       untrackedPaths: getReviewableGitPaths(
         untrackedResult.split(/\r?\n/)
       ),
