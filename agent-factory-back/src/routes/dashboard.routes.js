@@ -21,7 +21,8 @@ router.get("/", async (req, res) => {
           CASE role
             WHEN 'frontend' THEN 1
             WHEN 'backend' THEN 2
-            WHEN 'qa' THEN 3
+            WHEN 'fullstack' THEN 3
+            WHEN 'qa' THEN 4
           END
       `),
 

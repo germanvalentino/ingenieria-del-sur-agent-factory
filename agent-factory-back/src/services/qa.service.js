@@ -20,6 +20,26 @@ const EXCLUDED_CHECK_DIRECTORIES = new Set([
   "node_modules",
   "dist",
 ]);
+const EXCLUDED_REVIEW_DIRECTORIES = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  ".git",
+]);
+const EXCLUDED_REVIEW_FILENAMES = new Set([
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.production",
+  ".env.test",
+]);
+const EXCLUDED_REVIEW_EXTENSIONS = new Set([
+  ".pem",
+  ".key",
+  ".p12",
+  ".pfx",
+]);
 const ALLOWED_ROOT = path.resolve(
   "C:/proyectos"
 );
@@ -369,44 +389,202 @@ async function runGit(args, cwd) {
   return result.stdout.trim();
 }
 
-async function getBaseWorkingDirectory(
+function normalizeGitPath(gitPath) {
+  return gitPath.replace(/\\/g, "/");
+}
+
+function uniqueGitPaths(paths) {
+  return [
+    ...new Set(
+      paths
+        .map((filePath) =>
+          normalizeGitPath(filePath).trim()
+        )
+        .filter(Boolean)
+    ),
+  ];
+}
+
+function normalizeComparablePath(directory) {
+  const resolved = path.resolve(directory);
+  const normalized = normalizeGitPath(resolved);
+
+  return process.platform === "win32"
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+async function getGitStatusSnapshot(
   workingDirectory
 ) {
-  const worktreeRoot = await runGit(
-    ["rev-parse", "--show-toplevel"],
-    workingDirectory
-  );
-  const gitCommonDirectory = await runGit(
+  return runGit(
     [
-      "rev-parse",
-      "--path-format=absolute",
-      "--git-common-dir",
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
     ],
     workingDirectory
   );
-  const repositoryRoot = path.dirname(
-    gitCommonDirectory
-  );
-  const relativeWorkingDirectory =
-    path.relative(
-      worktreeRoot,
+}
+
+async function assertGitStatusUnchanged({
+  workingDirectory,
+  beforeStatus,
+}) {
+  const afterStatus =
+    await getGitStatusSnapshot(
       workingDirectory
     );
 
-  if (
-    relativeWorkingDirectory.startsWith("..")
-  ) {
+  if (afterStatus !== beforeStatus) {
     throw new Error(
-      "QA no pudo calcular la carpeta equivalente en la rama base"
+      [
+        "QA modificÃ³ el estado Git del worktree durante la validaciÃ³n.",
+        "QA no debe alterar archivos staged ni unstaged.",
+        "",
+        "=== STATUS ANTES ===",
+        sanitizeGitStatus(beforeStatus) ||
+          "(sin cambios visibles)",
+        "",
+        "=== STATUS DESPUÃ‰S ===",
+        sanitizeGitStatus(afterStatus) ||
+          "(sin cambios visibles)",
+      ].join("\n")
+    );
+  }
+}
+
+async function getGitChangedPaths(
+  workingDirectory
+) {
+  const [
+    unstagedResult,
+    stagedResult,
+    untrackedResult,
+  ] = await Promise.all([
+    runGit(
+      ["diff", "--name-only", "--"],
+      workingDirectory
+    ),
+    runGit(
+      [
+        "diff",
+        "--cached",
+        "--name-only",
+        "--",
+      ],
+      workingDirectory
+    ),
+    runGit(
+      [
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+      ],
+      workingDirectory
+    ),
+  ]);
+
+  return uniqueGitPaths(
+    [
+      unstagedResult,
+      stagedResult,
+      untrackedResult,
+    ].flatMap((output) =>
+      output.split(/\r?\n/)
+    )
+  );
+}
+
+function projectHasChanges({
+  changedPaths,
+  worktreeRoot,
+  projectDirectory,
+}) {
+  const relativeProjectPath = path.relative(
+    worktreeRoot,
+    projectDirectory
+  );
+  const relativeProjectDirectory =
+    normalizeGitPath(relativeProjectPath);
+
+  if (
+    relativeProjectDirectory === ".." ||
+    relativeProjectDirectory.startsWith("../") ||
+    path.isAbsolute(relativeProjectPath)
+  ) {
+    return false;
+  }
+
+  const isProjectRoot =
+    relativeProjectDirectory === "" ||
+    relativeProjectDirectory === ".";
+
+  if (isProjectRoot) {
+    return changedPaths.length > 0;
+  }
+
+  return changedPaths.some(
+    (changedPath) =>
+      changedPath === relativeProjectDirectory ||
+      changedPath.startsWith(
+        `${relativeProjectDirectory}/`
+      )
+  );
+}
+
+async function validateFullstackProjectDirectory({
+  label,
+  directory,
+  worktreeRoot,
+}) {
+  if (!directory?.trim()) {
+    throw new Error(
+      `QA fullstack requiere ruta ${label}`
     );
   }
 
-  return validateDirectory(
-    path.join(
-      repositoryRoot,
-      relativeWorkingDirectory
-    )
+  const trimmedDirectory = directory.trim();
+
+  if (!path.isAbsolute(trimmedDirectory)) {
+    throw new Error(
+      `QA fullstack requiere una ruta absoluta para ${label}`
+    );
+  }
+
+  const safeDirectory =
+    validateDirectory(trimmedDirectory);
+  const relativeDirectory = path.relative(
+    worktreeRoot,
+    safeDirectory
   );
+
+  if (
+    relativeDirectory === ".." ||
+    relativeDirectory.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeDirectory)
+  ) {
+    throw new Error(
+      `QA fullstack recibiÃ³ una ruta ${label} fuera del worktree`
+    );
+  }
+
+  try {
+    await fs.access(safeDirectory);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(
+        `QA fullstack recibiÃ³ una ruta ${label} inexistente: ${safeDirectory}`
+      );
+    }
+
+    throw error;
+  }
+
+  return {
+    label,
+    directory: safeDirectory,
+  };
 }
 
 function countLintErrors(output) {
@@ -427,93 +605,154 @@ function countLintErrors(output) {
 
 async function executeLintWithBaseline({
   workingDirectory,
-  baseBranch,
 }) {
-  const lintResult = await executeNpmScript({
+  return executeNpmScript({
     script: "lint",
     workingDirectory,
   });
+}
 
-  if (lintResult.status === "passed") {
-    return lintResult;
-  }
-
-  const baseWorkingDirectory =
-    await getBaseWorkingDirectory(
-      workingDirectory
-    );
+function shouldIncludeReviewFile(gitPath) {
+  const normalized = normalizeGitPath(gitPath);
+  const parts = normalized.split("/");
+  const filename =
+    parts.at(-1)?.toLowerCase() || "";
 
   if (
-    !(await hasInstalledDependencies(
-      baseWorkingDirectory
-    ))
+    EXCLUDED_REVIEW_FILENAMES.has(filename) ||
+    filename.startsWith(".env.")
   ) {
-    return {
-      script: "lint",
-      status: "failed",
-      output: [
-        "QA fallÃ³ al preparar la carpeta equivalente de la rama base para comparar lint.",
-        "QA no puede obtener la linea base de lint porque la carpeta equivalente de la rama base no tiene node_modules.",
-        "No se ejecuta npm ci en la rama base para no modificar node_modules.",
-        "",
-        "=== WORKTREE LINT ===",
-        lintResult.output,
-      ].join("\n"),
-    };
+    return false;
   }
 
-  const baseLintResult =
-    await executeNpmScript({
-      script: "lint",
-      workingDirectory:
-        baseWorkingDirectory,
+  if (
+    EXCLUDED_REVIEW_EXTENSIONS.has(
+      path.extname(filename)
+    )
+  ) {
+    return false;
+  }
+
+  return !parts.some((part) =>
+    EXCLUDED_REVIEW_DIRECTORIES.has(
+      part.toLowerCase()
+    )
+  );
+}
+
+function getReviewableGitPaths(paths) {
+  return uniqueGitPaths(paths).filter(
+    shouldIncludeReviewFile
+  );
+}
+
+function sanitizeGitStatus(status) {
+  return status
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .filter((line) => {
+      const rawPath = line.slice(3).trim();
+      const paths = rawPath
+        .split(" -> ")
+        .map((item) =>
+          item.replace(/^"|"$/g, "")
+        );
+
+      return paths.every(
+        shouldIncludeReviewFile
+      );
+    })
+    .join("\n");
+}
+
+async function getReviewDiff({
+  workingDirectory,
+  cached,
+  paths,
+}) {
+  const reviewablePaths =
+    getReviewableGitPaths(paths);
+
+  if (reviewablePaths.length === 0) {
+    return "";
+  }
+
+  return runGit(
+    [
+      "diff",
+      ...(cached ? ["--cached"] : []),
+      "--no-ext-diff",
+      "--unified=60",
+      "--",
+      ...reviewablePaths,
+    ],
+    workingDirectory
+  );
+}
+
+function formatAddedFileDiff({
+  gitPath,
+  content,
+}) {
+  const normalizedPath =
+    normalizeGitPath(gitPath);
+  const lines = content.split(/\r?\n/);
+
+  return [
+    `diff --git a/${normalizedPath} b/${normalizedPath}`,
+    "new file mode 100644",
+    "index 0000000..0000000",
+    "--- /dev/null",
+    `+++ b/${normalizedPath}`,
+    `@@ -0,0 +1,${lines.length} @@`,
+    ...lines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+async function buildUntrackedFilesDiff({
+  workingDirectory,
+  untrackedPaths,
+  remainingSize,
+}) {
+  const diffs = [];
+  let usedSize = 0;
+
+  for (const gitPath of untrackedPaths) {
+    if (!shouldIncludeReviewFile(gitPath)) {
+      continue;
+    }
+
+    const absolutePath = path.join(
+      workingDirectory,
+      gitPath
+    );
+    const stat = await fs.stat(absolutePath);
+
+    if (!stat.isFile()) {
+      continue;
+    }
+
+    const content = await fs.readFile(
+      absolutePath,
+      "utf8"
+    );
+    const diff = formatAddedFileDiff({
+      gitPath,
+      content,
     });
 
-  if (baseLintResult.status !== "failed") {
-    return lintResult;
+    usedSize += diff.length;
+
+    if (usedSize > remainingSize) {
+      throw new Error(
+        `El diff es demasiado grande para una sola revisiÃ³n QA: supera ${remainingSize} caracteres al incorporar archivos nuevos`
+      );
+    }
+
+    diffs.push(diff);
   }
 
-  const worktreeErrors = countLintErrors(
-    lintResult.output
-  );
-  const baseErrors = countLintErrors(
-    baseLintResult.output
-  );
-
-  if (worktreeErrors <= baseErrors) {
-    return {
-      script: "lint",
-      status: "warning",
-      output: [
-        "QA_BASELINE_WARNING",
-        `npm run lint fallÃ³ en ${baseBranch} y en el worktree, pero el worktree no agrega errores.`,
-        `Errores worktree: ${worktreeErrors}`,
-        `Errores ${baseBranch}: ${baseErrors}`,
-        "",
-        "=== WORKTREE LINT ===",
-        lintResult.output,
-        "",
-        `=== ${baseBranch} LINT ===`,
-        baseLintResult.output,
-      ].join("\n"),
-    };
-  }
-
-  return {
-    script: "lint",
-    status: "failed",
-    output: [
-      `npm run lint agrega errores frente a ${baseBranch}.`,
-      `Errores worktree: ${worktreeErrors}`,
-      `Errores ${baseBranch}: ${baseErrors}`,
-      "",
-      "=== WORKTREE LINT ===",
-      lintResult.output,
-      "",
-      `=== ${baseBranch} LINT ===`,
-      baseLintResult.output,
-    ].join("\n"),
-  };
+  return diffs.join("\n\n");
 }
 
 async function getGitChanges(
@@ -523,63 +762,79 @@ async function getGitChanges(
    * Hace visibles en git diff también los archivos
    * nuevos, sin agregarlos realmente al commit.
    */
-  await execFileAsync(
-    "git",
-    [
-      "add",
-      "--intent-to-add",
-      "--",
-      ".",
-    ],
-    {
-        cwd: workingDirectory,
-        windowsHide: true,
-        timeout: MAX_COMMAND_TIME,
-        maxBuffer: MAX_COMMAND_BUFFER,
-      }
-  );
-
-  const [statusResult, diffResult] =
+  const MAX_DIFF_SIZE = 120000;
+  const [
+    status,
+    unstagedPathsResult,
+    stagedPathsResult,
+    untrackedResult,
+  ] =
     await Promise.all([
-      execFileAsync(
-        "git",
-        ["status", "--short"],
-        {
-          cwd: workingDirectory,
-          windowsHide: true,
-          timeout: MAX_COMMAND_TIME,
-          maxBuffer: MAX_COMMAND_BUFFER,
-        }
+      getGitStatusSnapshot(
+        workingDirectory
       ),
-
-      execFileAsync(
-        "git",
+      runGit(
         [
           "diff",
-          "--no-ext-diff",
-          "--unified=60",
+          "--name-only",
           "--",
-          ".",
         ],
-        {
-          cwd: workingDirectory,
-          windowsHide: true,
-          timeout: MAX_COMMAND_TIME,
-          maxBuffer: MAX_COMMAND_BUFFER,
-        }
+        workingDirectory
+      ),
+      runGit(
+        [
+          "diff",
+          "--cached",
+          "--name-only",
+          "--",
+        ],
+        workingDirectory
+      ),
+      runGit(
+        [
+          "ls-files",
+          "--others",
+          "--exclude-standard",
+        ],
+        workingDirectory
       ),
     ]);
 
-  const status = statusResult.stdout.trim();
-  const diff = diffResult.stdout.trim();
+  const unstagedDiff = await getReviewDiff({
+    workingDirectory,
+    cached: false,
+    paths: unstagedPathsResult.split(/\r?\n/),
+  });
+  const stagedDiff = await getReviewDiff({
+    workingDirectory,
+    cached: true,
+    paths: stagedPathsResult.split(/\r?\n/),
+  });
+  const trackedDiff = [
+    unstagedDiff,
+    stagedDiff,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const untrackedDiff =
+    await buildUntrackedFilesDiff({
+      workingDirectory,
+      untrackedPaths: getReviewableGitPaths(
+        untrackedResult.split(/\r?\n/)
+      ),
+      remainingSize:
+        MAX_DIFF_SIZE - trackedDiff.length,
+    });
+  const diff = [trackedDiff, untrackedDiff]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
 
   if (!diff) {
     throw new Error(
       "QA no encontró cambios para revisar"
     );
   }
-
-  const MAX_DIFF_SIZE = 120000;
 
   if (diff.length > MAX_DIFF_SIZE) {
     throw new Error(
@@ -588,7 +843,7 @@ async function getGitChanges(
   }
 
   return {
-    status,
+    status: sanitizeGitStatus(status),
     diff,
   };
 }
@@ -620,18 +875,12 @@ function parseQaVerdict(output) {
   };
 }
 
-export async function runQaValidation({
+async function runProjectValidations({
   workingDirectory,
-  baseBranch = "main",
-  taskTitle,
-  taskDescription,
-  correctionFeedback,
+  baseBranch,
 }) {
-  const safeDirectory =
-    validateDirectory(workingDirectory);
-
   const packageJsonPath = path.join(
-    safeDirectory,
+    workingDirectory,
     "package.json"
   );
 
@@ -664,13 +913,13 @@ export async function runQaValidation({
   if (usingNodeSyntaxCheck) {
     results.push(
       await executeNodeSyntaxCheck(
-        safeDirectory
+        workingDirectory
       )
     );
   } else {
     const dependenciesResult =
       await ensureDependencies(
-        safeDirectory
+        workingDirectory
       );
 
     if (dependenciesResult) {
@@ -680,23 +929,9 @@ export async function runQaValidation({
         dependenciesResult.status ===
         "failed"
       ) {
-        const commandsSummary = results
-          .map(
-            (result) =>
-              [
-                `=== ${formatCommandLabel(result.script)} ===`,
-                `RESULTADO: ${result.status.toUpperCase()}`,
-                result.output,
-              ].join("\n")
-          )
-          .join("\n\n");
-
         return {
-          status: "failed",
-          summary: commandsSummary,
           results,
-          codexUsage: null,
-          codexModel: null,
+          usingNodeSyntaxCheck,
         };
       }
     }
@@ -707,14 +942,12 @@ export async function runQaValidation({
       const result =
         script === "lint"
           ? await executeLintWithBaseline({
-              workingDirectory:
-                safeDirectory,
+              workingDirectory,
               baseBranch,
             })
           : await executeNpmScript({
               script,
-              workingDirectory:
-                safeDirectory,
+              workingDirectory,
             });
 
       results.push(result);
@@ -725,13 +958,14 @@ export async function runQaValidation({
     }
   }
 
-  const commandsPassed = results.every(
-    (result) =>
-      result.status === "passed" ||
-      result.status === "warning"
-  );
+  return {
+    results,
+    usingNodeSyntaxCheck,
+  };
+}
 
-  const commandsSummary = results
+function formatResultsSummary(results) {
+  return results
     .map(
       (result) =>
         [
@@ -741,8 +975,220 @@ export async function runQaValidation({
         ].join("\n")
     )
     .join("\n\n");
+}
+
+function prefixProjectResults({
+  label,
+  results,
+}) {
+  return results.map((result) => ({
+    ...result,
+    project: label,
+    script: `${label} ${result.script}`,
+  }));
+}
+
+async function dedupeValidationProjects(projects) {
+  const projectsByDirectory = new Map();
+
+  for (const project of projects) {
+    const realDirectory = await fs.realpath(
+      project.directory
+    );
+    const directoryKey =
+      normalizeComparablePath(realDirectory);
+    const existing =
+      projectsByDirectory.get(directoryKey);
+
+    if (existing) {
+      existing.labels.push(project.label);
+      continue;
+    }
+
+    projectsByDirectory.set(directoryKey, {
+      labels: [project.label],
+      directory: realDirectory,
+    });
+  }
+
+  return [...projectsByDirectory.values()].map(
+    (project) => ({
+      label:
+        project.labels.includes("FRONTEND") &&
+        project.labels.includes("BACKEND")
+          ? "FULLSTACK"
+          : project.labels[0],
+      directory: project.directory,
+    })
+  );
+}
+
+function formatProjectResultsSummary({
+  label,
+  results,
+}) {
+  return results
+    .map(
+      (result) =>
+        [
+          `=== ${label}: ${formatCommandLabel(result.script)} ===`,
+          `RESULTADO: ${result.status.toUpperCase()}`,
+          result.output,
+        ].join("\n")
+    )
+    .join("\n\n");
+}
+
+export async function runQaValidation({
+  workingDirectory,
+  projectDirectories = null,
+  baseBranch = "main",
+  taskTitle,
+  taskDescription,
+  correctionFeedback,
+}) {
+  const safeDirectory =
+    validateDirectory(workingDirectory);
+  const initialGitStatus =
+    await getGitStatusSnapshot(
+      safeDirectory
+    );
+
+  let results = [];
+  let usingNodeSyntaxCheck = false;
+  let commandsSummary;
+
+  if (projectDirectories?.length) {
+    const changedPaths = await getGitChangedPaths(
+      safeDirectory
+    );
+    const frontendProject =
+      projectDirectories.find(
+        (project) =>
+          project.label === "FRONTEND"
+      );
+    const backendProject =
+      projectDirectories.find(
+        (project) =>
+          project.label === "BACKEND"
+      );
+
+    if (
+      !frontendProject ||
+      !backendProject
+    ) {
+      throw new Error(
+        "QA fullstack requiere rutas FRONTEND y BACKEND"
+      );
+    }
+
+    const projects = await Promise.all([
+      validateFullstackProjectDirectory({
+        label: "FRONTEND",
+        directory:
+          frontendProject.directory,
+        worktreeRoot: safeDirectory,
+      }),
+      validateFullstackProjectDirectory({
+        label: "BACKEND",
+        directory:
+          backendProject.directory,
+        worktreeRoot: safeDirectory,
+      }),
+    ]);
+    const validationProjects =
+      await dedupeValidationProjects(projects);
+    const directlyChangedProjects =
+      validationProjects.filter((project) =>
+        projectHasChanges({
+          changedPaths,
+          worktreeRoot: safeDirectory,
+          projectDirectory: project.directory,
+        })
+      );
+
+    const hasSharedRootChanges =
+      changedPaths.some(
+        (changedPath) =>
+          !validationProjects.some((project) =>
+            projectHasChanges({
+              changedPaths: [changedPath],
+              worktreeRoot: safeDirectory,
+              projectDirectory:
+                project.directory,
+            })
+          )
+      );
+
+    const changedProjects =
+      hasSharedRootChanges
+        ? validationProjects
+        : directlyChangedProjects;
+
+    if (changedProjects.length === 0) {
+      throw new Error(
+        "QA no encontrÃ³ cambios en FRONTEND ni BACKEND"
+      );
+    }
+
+    const projectSummaries = [];
+
+    for (const project of changedProjects) {
+      const projectValidation =
+        await runProjectValidations({
+          workingDirectory:
+            project.directory,
+          baseBranch,
+        });
+
+      usingNodeSyntaxCheck =
+        usingNodeSyntaxCheck ||
+        projectValidation.usingNodeSyntaxCheck;
+      results.push(
+        ...prefixProjectResults({
+          label: project.label,
+          results:
+            projectValidation.results,
+        })
+      );
+      projectSummaries.push(
+        formatProjectResultsSummary({
+          label: project.label,
+          results:
+            projectValidation.results,
+        })
+      );
+
+    }
+
+    commandsSummary =
+      projectSummaries.join("\n\n");
+  } else {
+    const projectValidation =
+      await runProjectValidations({
+        workingDirectory: safeDirectory,
+        baseBranch,
+      });
+
+    results = projectValidation.results;
+    usingNodeSyntaxCheck =
+      projectValidation.usingNodeSyntaxCheck;
+    commandsSummary =
+      formatResultsSummary(results);
+  }
+
+  const commandsPassed = results.every(
+    (result) =>
+      result.status === "passed" ||
+      result.status === "warning"
+  );
 
   if (!commandsPassed) {
+    await assertGitStatusUnchanged({
+      workingDirectory: safeDirectory,
+      beforeStatus: initialGitStatus,
+    });
+
     return {
       status: "failed",
       summary: commandsSummary,
@@ -755,7 +1201,7 @@ export async function runQaValidation({
   const validationsMessage =
     usingNodeSyntaxCheck
       ? "Considerá que node --check ya finalizó correctamente."
-      : "Considerá que lint y build ya finalizaron correctamente.";
+      : "Considera que las validaciones configuradas ya finalizaron correctamente. No exijas node --check si el proyecto tiene scripts lint, test o build; node --check es solamente el fallback cuando no existe ninguno de esos scripts.";
 
   const gitChanges =
   await getGitChanges(safeDirectory);
@@ -829,6 +1275,11 @@ RIESGOS:
     "=== REVISIÓN DE CÓDIGO CODEX ===",
     codexReview.output,
   ].join("\n");
+
+  await assertGitStatusUnchanged({
+    workingDirectory: safeDirectory,
+    beforeStatus: initialGitStatus,
+  });
 
   return {
     status: verdict.status,

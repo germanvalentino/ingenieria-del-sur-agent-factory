@@ -73,9 +73,22 @@ function validateBranchName(branchName) {
 export async function prepareTaskWorktree({
   taskId,
   targetDirectory,
+  assignedRole = null,
+  frontendPath = null,
+  backendPath = null,
   branchName,
   baseBranch = "main",
 }) {
+  if (assignedRole === "fullstack") {
+    return prepareFullstackTaskWorktree({
+      taskId,
+      frontendPath,
+      backendPath,
+      branchName,
+      baseBranch,
+    });
+  }
+
   const safeTargetDirectory =
     validateAllowedPath(targetDirectory);
 
@@ -153,8 +166,412 @@ export async function prepareTaskWorktree({
 
   return {
     repositoryRoot,
+    worktreePath: worktreeRoot,
     worktreeRoot,
+    agentWorkingPath: agentWorkingDirectory,
     agentWorkingDirectory,
+    branchName,
+    baseBranch,
+  };
+}
+
+async function resolveRepositoryRoot(
+  directory
+) {
+  const safeDirectory =
+    validateAllowedPath(directory);
+
+  try {
+    await fs.access(safeDirectory);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(
+        `La ruta no existe: ${safeDirectory}`
+      );
+    }
+
+    throw error;
+  }
+
+  const repositoryResult = await runGit(
+    ["rev-parse", "--show-toplevel"],
+    safeDirectory
+  );
+
+  return {
+    directory: safeDirectory,
+    repositoryRoot: validateAllowedPath(
+      repositoryResult.stdout
+    ),
+  };
+}
+
+function resolveRelativePath({
+  repositoryRoot,
+  directory,
+}) {
+  const relativePath = path.relative(
+    repositoryRoot,
+    directory
+  );
+
+  if (
+    relativePath.startsWith("..") ||
+    path.isAbsolute(relativePath)
+  ) {
+    throw new Error(
+      "El directorio asignado no pertenece al repositorio"
+    );
+  }
+
+  return relativePath;
+}
+
+function assertRelativePathDoesNotEscape(
+  relativePath
+) {
+  const normalized = path.normalize(
+    relativePath
+  );
+
+  if (
+    path.isAbsolute(normalized) ||
+    normalized === ".." ||
+    normalized.startsWith(`..${path.sep}`)
+  ) {
+    throw new Error(
+      `La ruta relativa escapa del repositorio: ${relativePath}`
+    );
+  }
+
+  return normalized;
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+function isPathInside(parent, child) {
+  const relativePath = path.relative(
+    parent,
+    child
+  );
+
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith("..") &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
+async function resolveProjectPath({
+  projectPath,
+  repositoryRoot,
+  label,
+}) {
+  if (!projectPath?.trim()) {
+    throw new Error(
+      `La ruta ${label} no está configurada`
+    );
+  }
+
+  const trimmedPath = projectPath.trim();
+  const isAbsolute = path.isAbsolute(trimmedPath);
+  const directory = isAbsolute
+    ? validateAllowedPath(trimmedPath)
+    : path.join(
+        repositoryRoot,
+        assertRelativePathDoesNotEscape(
+          trimmedPath
+        )
+      );
+
+  const safeDirectory =
+    validateAllowedPath(directory);
+
+  if (
+    repositoryRoot &&
+    !isPathInside(
+      repositoryRoot,
+      safeDirectory
+    )
+  ) {
+    throw new Error(
+      `La ruta ${label} no pertenece a la raíz Git principal`
+    );
+  }
+
+  if (!(await pathExists(safeDirectory))) {
+    throw new Error(
+      `La ruta ${label} no existe: ${safeDirectory}`
+    );
+  }
+
+  const projectRepositoryRoot = (
+    await resolveRepositoryRoot(safeDirectory)
+  ).repositoryRoot;
+
+  if (
+    repositoryRoot &&
+    projectRepositoryRoot !== repositoryRoot
+  ) {
+    throw new Error(
+      `La ruta ${label} pertenece a otro repositorio Git`
+    );
+  }
+
+  return {
+    directory: safeDirectory,
+    repositoryRoot: projectRepositoryRoot,
+    relativePath: resolveRelativePath({
+      repositoryRoot: projectRepositoryRoot,
+      directory: safeDirectory,
+    }),
+  };
+}
+
+export async function resolveFullstackProjectPaths({
+  frontendPath,
+  backendPath,
+  repositoryRoot = null,
+  worktreeRoot = null,
+}) {
+  if (!frontendPath?.trim()) {
+    throw new Error(
+      "frontend_path no está configurado"
+    );
+  }
+
+  if (!backendPath?.trim()) {
+    throw new Error(
+      "backend_path no está configurado"
+    );
+  }
+
+  const normalizedFrontendPath =
+    frontendPath.trim();
+  const normalizedBackendPath =
+    backendPath.trim();
+
+  if (
+    !path.isAbsolute(normalizedFrontendPath) ||
+    !path.isAbsolute(normalizedBackendPath)
+  ) {
+    throw new Error(
+      "Las tareas fullstack requieren frontend_path y backend_path absolutos"
+    );
+  }
+
+  let mainRepositoryRoot = repositoryRoot
+    ? validateAllowedPath(repositoryRoot)
+    : null;
+
+  if (!mainRepositoryRoot) {
+    const frontendRepository = (
+      await resolveRepositoryRoot(
+        validateAllowedPath(
+          normalizedFrontendPath
+        )
+      )
+    ).repositoryRoot;
+
+    const backendRepository = (
+      await resolveRepositoryRoot(
+        validateAllowedPath(
+          normalizedBackendPath
+        )
+      )
+    ).repositoryRoot;
+
+    if (
+      path.resolve(
+        frontendRepository
+      ).toLowerCase() !==
+      path.resolve(
+        backendRepository
+      ).toLowerCase()
+    ) {
+      throw new Error(
+        "La tarea fullstack requiere que frontend_path y backend_path pertenezcan al mismo repositorio Git"
+      );
+    }
+
+    mainRepositoryRoot = frontendRepository;
+  }
+  const frontend = await resolveProjectPath({
+	projectPath: normalizedFrontendPath,
+    repositoryRoot: mainRepositoryRoot,
+    label: "frontend_path",
+  });
+  const backend = await resolveProjectPath({
+    projectPath: normalizedBackendPath,
+    repositoryRoot: mainRepositoryRoot,
+    label: "backend_path",
+  });
+
+  const result = {
+    repositoryRoot: mainRepositoryRoot,
+    frontendOriginalDirectory:
+      frontend.directory,
+    backendOriginalDirectory: backend.directory,
+    frontendRelativePath:
+      frontend.relativePath,
+    backendRelativePath: backend.relativePath,
+  };
+
+  if (worktreeRoot) {
+    const safeWorktree =
+      validateAllowedPath(worktreeRoot);
+    const frontendWorkingDirectory =
+      validateAllowedPath(
+        path.join(
+          safeWorktree,
+          frontend.relativePath
+        )
+      );
+    const backendWorkingDirectory =
+      validateAllowedPath(
+        path.join(
+          safeWorktree,
+          backend.relativePath
+        )
+      );
+
+    if (
+      !isPathInside(
+        safeWorktree,
+        frontendWorkingDirectory
+      ) ||
+      !isPathInside(
+        safeWorktree,
+        backendWorkingDirectory
+      )
+    ) {
+      throw new Error(
+        "Las rutas fullstack resueltas no pertenecen al worktree esperado"
+      );
+    }
+
+    if (
+      !(await pathExists(
+        frontendWorkingDirectory
+      )) ||
+      !(await pathExists(
+        backendWorkingDirectory
+      ))
+    ) {
+      throw new Error(
+        "Las rutas fullstack resueltas no existen dentro del worktree"
+      );
+    }
+
+    return {
+      ...result,
+      frontendWorkingDirectory,
+      backendWorkingDirectory,
+    };
+  }
+
+  return result;
+}
+
+async function prepareFullstackTaskWorktree({
+  taskId,
+  frontendPath,
+  backendPath,
+  branchName,
+  baseBranch = "main",
+}) {
+  validateBranchName(branchName);
+  validateBranchName(baseBranch);
+
+  const projectPaths =
+    await resolveFullstackProjectPaths({
+      frontendPath,
+      backendPath,
+    });
+
+  const statusResult = await runGit(
+    ["status", "--porcelain"],
+    projectPaths.repositoryRoot
+  );
+
+  if (statusResult.stdout) {
+    throw new Error(
+      "El repositorio principal tiene cambios sin guardar. HacÃ© commit o descartalos antes de ejecutar un agente."
+    );
+  }
+
+  await fs.mkdir(WORKTREES_ROOT, {
+    recursive: true,
+  });
+
+  const worktreeRoot = path.join(
+    WORKTREES_ROOT,
+    taskId
+  );
+
+  try {
+    await fs.access(worktreeRoot);
+
+    throw new Error(
+      `Ya existe un worktree para la tarea: ${worktreeRoot}`
+    );
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  await runGit(
+    [
+      "worktree",
+      "add",
+      "-b",
+      branchName,
+      worktreeRoot,
+      baseBranch,
+    ],
+    projectPaths.repositoryRoot
+  );
+
+  const worktreePaths =
+    await resolveFullstackProjectPaths({
+      frontendPath,
+      backendPath,
+      repositoryRoot:
+        projectPaths.repositoryRoot,
+      worktreeRoot,
+    });
+
+  return {
+    repositoryRoot:
+      projectPaths.repositoryRoot,
+    worktreePath: worktreeRoot,
+    worktreeRoot,
+    agentWorkingPath: worktreeRoot,
+    agentWorkingDirectory: worktreeRoot,
+    frontendWorkingPath:
+      worktreePaths.frontendWorkingDirectory,
+    backendWorkingPath:
+      worktreePaths.backendWorkingDirectory,
+    frontendWorkingDirectory:
+      worktreePaths.frontendWorkingDirectory,
+    backendWorkingDirectory:
+      worktreePaths.backendWorkingDirectory,
+    frontendRelativePath:
+      worktreePaths.frontendRelativePath,
+    backendRelativePath:
+      worktreePaths.backendRelativePath,
     branchName,
     baseBranch,
   };

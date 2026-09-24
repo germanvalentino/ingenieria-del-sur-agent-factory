@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { pool } from "../db.js";
 import { executeCodex } from "../services/codex.service.js";
 import { runQaValidation } from "../services/qa.service.js";
@@ -19,8 +20,30 @@ const router = Router();
 const VALID_ROLES = [
   "frontend",
   "backend",
+  "fullstack",
   "qa",
 ];
+
+function buildAllowedPathsPrompt({
+  assignedRole,
+  frontendWorkingDirectory,
+  backendWorkingDirectory,
+  agentWorkingDirectory,
+}) {
+  if (assignedRole === "fullstack") {
+    return [
+      "RUTAS PERMITIDAS:",
+      `- FRONTEND: ${frontendWorkingDirectory}`,
+      `- BACKEND: ${backendWorkingDirectory}`,
+      "- PodÃ©s modificar ambas rutas permitidas.",
+    ].join("\n");
+  }
+
+  return [
+    "RUTA PERMITIDA:",
+    `- ${agentWorkingDirectory}`,
+  ].join("\n");
+}
 
 function createBranchName(role, title) {
   const slug = title
@@ -62,6 +85,44 @@ router.post("/", async (req, res) => {
   }
 
   try {
+	     if (assignedRole === "fullstack") {
+      const projectResult = await pool.query(
+        `
+          SELECT
+            frontend_path,
+            backend_path
+          FROM projects
+          WHERE id = $1
+            AND active = TRUE
+        `,
+        [projectId]
+      );
+
+      const project = projectResult.rows[0];
+      const frontendPath =
+        project?.frontend_path?.trim();
+      const backendPath =
+        project?.backend_path?.trim();
+
+      if (!frontendPath || !backendPath) {
+        return res.status(400).json({
+          status: "error",
+          message:
+            "El proyecto fullstack debe tener frontend_path y backend_path configurados",
+        });
+      }
+
+      if (
+        !path.isAbsolute(frontendPath) ||
+        !path.isAbsolute(backendPath)
+      ) {
+        return res.status(400).json({
+          status: "error",
+          message:
+            "Las tareas fullstack requieren frontend_path y backend_path absolutos",
+        });
+      }
+    }
     const result = await pool.query(
       `
         INSERT INTO tasks (
@@ -91,6 +152,11 @@ router.post("/", async (req, res) => {
             WHEN $4::varchar = 'frontend'
               THEN p.frontend_path IS NOT NULL
                 AND TRIM(p.frontend_path) <> ''
+            WHEN $4::varchar = 'fullstack'
+              THEN p.frontend_path IS NOT NULL
+                AND TRIM(p.frontend_path) <> ''
+                AND p.backend_path IS NOT NULL
+                AND TRIM(p.backend_path) <> ''
             WHEN $4 IN ('backend', 'qa')
               THEN p.backend_path IS NOT NULL
                 AND TRIM(p.backend_path) <> ''
@@ -276,7 +342,22 @@ router.post("/:id/run", async (req, res) => {
         ? task.frontend_path
         : task.backend_path;
 
-    if (!targetDirectory) {
+    if (
+      task.assigned_role === "fullstack" &&
+      (!task.frontend_path ||
+        !task.backend_path)
+    ) {
+      return res.status(400).json({
+        status: "error",
+        message:
+          "El proyecto no tiene configuradas frontend_path y backend_path para el agente fullstack",
+      });
+    }
+
+    if (
+      task.assigned_role !== "fullstack" &&
+      !targetDirectory
+    ) {
       return res.status(400).json({
         status: "error",
         message:
@@ -318,11 +399,33 @@ const existingWorktreeIsValid =
   existsSync(task.agent_working_path);
 
 if (existingWorktreeIsValid) {
+  if (
+    task.assigned_role === "fullstack" &&
+    (!task.frontend_working_path ||
+      !task.backend_working_path)
+  ) {
+    throw new Error(
+      "La tarea fullstack tiene un worktree existente sin frontend_working_path o backend_working_path. VolvÃ© a ejecutar el agente para regenerar el worktree."
+    );
+  }
+
   worktree = {
+    worktreePath:
+      task.worktree_path,
     worktreeRoot:
       task.worktree_path,
+    agentWorkingPath:
+      task.agent_working_path,
     agentWorkingDirectory:
       task.agent_working_path,
+    frontendWorkingPath:
+      task.frontend_working_path,
+    backendWorkingPath:
+      task.backend_working_path,
+    frontendWorkingDirectory:
+      task.frontend_working_path,
+    backendWorkingDirectory:
+      task.backend_working_path,
     branchName:
       task.branch_name,
     baseBranch:
@@ -333,17 +436,33 @@ if (existingWorktreeIsValid) {
     `Reutilizando worktree para tarea ${task.id}: ${task.worktree_path}`
   );
 } else {
-  worktree =
-    await prepareTaskWorktree({
-      taskId: task.id,
-      targetDirectory,
-      branchName:
-        task.branch_name,
-      baseBranch:
-        task.base_branch ||
-        "main",
-    });
+  worktree = await prepareTaskWorktree({
+    taskId: task.id,
+    targetDirectory,
+    assignedRole:
+      task.assigned_role,
+    frontendPath:
+      task.frontend_path,
+    backendPath:
+      task.backend_path,
+    branchName:
+      task.branch_name,
+    baseBranch:
+      task.base_branch || "main",
+  });
 }
+
+    const allowedPathsPrompt =
+      buildAllowedPathsPrompt({
+        assignedRole:
+          task.assigned_role,
+        frontendWorkingDirectory:
+          worktree.frontendWorkingPath,
+        backendWorkingDirectory:
+          worktree.backendWorkingPath,
+        agentWorkingDirectory:
+          worktree.agentWorkingPath,
+      });
 
     await pool.query(
       `
@@ -351,6 +470,8 @@ if (existingWorktreeIsValid) {
 SET status = 'running',
     worktree_path = $2,
     agent_working_path = $3,
+    frontend_working_path = $4,
+    backend_working_path = $5,
     qa_status = 'pending',
     execution_started_at = NOW(),
     execution_finished_at = NULL,
@@ -359,8 +480,10 @@ WHERE id = $1
       `,
       [
   task.id,
-  worktree.worktreeRoot,
-  worktree.agentWorkingDirectory,
+  worktree.worktreePath,
+  worktree.agentWorkingPath,
+  worktree.frontendWorkingPath || null,
+  worktree.backendWorkingPath || null,
 ]
     );
 
@@ -408,6 +531,8 @@ CONTEXTO GIT:
 - Estás trabajando dentro de un git worktree aislado.
 - La carpeta principal del usuario no debe modificarse.
 
+${allowedPathsPrompt}
+
 REGLAS OBLIGATORIAS:
 - Trabajá solamente dentro del directorio asignado.
 - No cambies de rama.
@@ -428,13 +553,13 @@ REGLAS OBLIGATORIAS:
 
     const result = await executeCodex({
       workingDirectory:
-        worktree.agentWorkingDirectory,
+        worktree.agentWorkingPath,
       prompt,
     });
 
     const gitStatus =
       await getWorktreeStatus(
-        worktree.worktreeRoot
+        worktree.worktreePath
       );
 
     const summary = [
@@ -444,7 +569,7 @@ REGLAS OBLIGATORIAS:
       gitStatus || "Sin cambios pendientes.",
       "",
       `Rama: ${task.branch_name}`,
-      `Worktree: ${worktree.worktreeRoot}`,
+      `Worktree: ${worktree.worktreePath}`,
     ].join("\n");
 
     const updatedTask = await pool.query(
@@ -537,9 +662,14 @@ router.post(
     try {
       const taskResult = await pool.query(
         `
-          SELECT *
-          FROM tasks
-          WHERE id = $1
+          SELECT
+            t.*,
+            p.frontend_path,
+            p.backend_path
+          FROM tasks t
+          INNER JOIN projects p
+            ON p.id = t.project_id
+          WHERE t.id = $1
         `,
         [req.params.id]
       );
@@ -566,6 +696,18 @@ router.post(
           status: "error",
           message:
             "La tarea no tiene un directorio de trabajo",
+        });
+      }
+
+      if (
+        task.assigned_role === "fullstack" &&
+        (!task.frontend_working_path ||
+          !task.backend_working_path)
+      ) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea fullstack no tiene rutas de trabajo frontend/backend guardadas. VolvÃ© a ejecutar el agente antes de ejecutar QA.",
         });
       }
 
@@ -636,6 +778,21 @@ const qaResult =
   await runQaValidation({
     workingDirectory:
       task.agent_working_path,
+    projectDirectories:
+      task.assigned_role === "fullstack"
+        ? [
+            {
+              label: "FRONTEND",
+              directory:
+                task.frontend_working_path,
+            },
+            {
+              label: "BACKEND",
+              directory:
+                task.backend_working_path,
+            },
+          ]
+        : null,
     baseBranch:
       task.base_branch || "main",
     taskTitle: task.title,
@@ -800,9 +957,14 @@ router.post(
     try {
       const taskResult = await pool.query(
         `
-          SELECT *
-          FROM tasks
-          WHERE id = $1
+          SELECT
+            t.*,
+            p.frontend_path,
+            p.backend_path
+          FROM tasks t
+          INNER JOIN projects p
+            ON p.id = t.project_id
+          WHERE t.id = $1
         `,
         [req.params.id]
       );
@@ -837,6 +999,18 @@ router.post(
           status: "error",
           message:
             "La tarea no tiene un worktree activo",
+        });
+      }
+
+      if (
+        task.assigned_role === "fullstack" &&
+        (!task.frontend_working_path ||
+          !task.backend_working_path)
+      ) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "La tarea fullstack no tiene rutas de trabajo frontend/backend guardadas. Volve a ejecutar el agente antes de corregir.",
         });
       }
 
@@ -897,6 +1071,30 @@ router.post(
 
       executionId = execution.id;
 
+      let correctionAllowedPathsPrompt =
+        buildAllowedPathsPrompt({
+          assignedRole:
+            task.assigned_role,
+          agentWorkingDirectory:
+            task.agent_working_path,
+        });
+
+      if (
+        task.assigned_role === "fullstack"
+      ) {
+        correctionAllowedPathsPrompt =
+          buildAllowedPathsPrompt({
+            assignedRole:
+              task.assigned_role,
+            frontendWorkingDirectory:
+              task.frontend_working_path,
+            backendWorkingDirectory:
+              task.backend_working_path,
+            agentWorkingDirectory:
+              task.agent_working_path,
+          });
+      }
+
       const prompt = `
 Sos el ${agent.name} de Ingeniería del Sur.
 
@@ -926,6 +1124,8 @@ INSTRUCCIONES:
 - Conservá las partes que ya funcionan correctamente.
 - Trabajá solamente dentro del directorio asignado.
 - No cambies de rama.
+${correctionAllowedPathsPrompt}
+
 - No hagas commit, push, merge ni deploy.
 - No leas ni muestres archivos .env.
 - Ejecutá lint, tests o build cuando correspondan.
