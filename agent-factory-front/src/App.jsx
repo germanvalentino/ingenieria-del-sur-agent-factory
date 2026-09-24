@@ -28,6 +28,7 @@ const initialForm = {
 };
 
 const initialDashboard = {
+  serverTime: null,
   projects: [],
   agents: [],
   tasks: [],
@@ -384,6 +385,20 @@ function formatUpdateTime(date) {
   });
 }
 
+function formatServerTime(value) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return formatUpdateTime(date);
+}
+
 function getErrorMessage(error) {
   return error instanceof Error
     ? error.message
@@ -526,6 +541,7 @@ function App() {
   const selectedProjectId =
     form.projectId || dashboard.projects[0]?.id || "";
   const agentOptions = getAgentOptions(dashboard.agents);
+  const serverTime = formatServerTime(dashboard.serverTime);
   const loadDashboard = dashboardStore.loadDashboard;
   const setDashboard = dashboardStore.updateDashboard;
   const setError = (message) => {
@@ -891,10 +907,18 @@ async function correctTask(taskId) {
           </div>
 
           <div className="flex items-center gap-3">
-            {lastUpdateTime && (
-              <span className="text-xs text-slate-500">
-                Última actualización: {lastUpdateTime}
-              </span>
+            {(lastUpdateTime || serverTime) && (
+              <div className="text-right text-xs text-slate-500">
+                {lastUpdateTime && (
+                  <p>
+                    Última actualización: {lastUpdateTime}
+                  </p>
+                )}
+
+                {serverTime && (
+                  <p>Hora del servidor: {serverTime}</p>
+                )}
+              </div>
             )}
 
             <button

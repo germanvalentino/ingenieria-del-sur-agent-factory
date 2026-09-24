@@ -40,6 +40,7 @@ router.get("/", async (req, res) => {
     const tasks = tasksResult.rows;
 
     res.json({
+      serverTime: new Date().toISOString(),
       projects: projectsResult.rows,
       agents: agentsResult.rows,
       tasks,
