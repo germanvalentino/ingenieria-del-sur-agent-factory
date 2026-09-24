@@ -47,6 +47,20 @@ const initialDashboardState = {
   lastUpdateTime: "",
 };
 
+const fallbackAgentOptions = [
+  { value: "frontend", label: "Frontend Agent" },
+  { value: "backend", label: "Backend Agent" },
+  { value: "qa", label: "QA Agent" },
+  { value: "fullstack", label: "Fullstack Agent" },
+];
+
+const agentRoleLabels = {
+  frontend: "Frontend Agent",
+  backend: "Backend Agent",
+  qa: "QA Agent",
+  fullstack: "Fullstack Agent",
+};
+
 const statusClasses = {
   backlog: "bg-slate-500/15 text-slate-300",
   queued: "bg-amber-500/15 text-amber-300",
@@ -80,6 +94,61 @@ function pickValue(record, keys) {
   }
 
   return null;
+}
+
+function getAgentRole(agent) {
+  const role = pickValue(agent, [
+    "assignedRole",
+    "assigned_role",
+    "role",
+  ]);
+
+  return role ? String(role).toLowerCase() : null;
+}
+
+function isActiveAgent(agent) {
+  if (agent?.active !== undefined) {
+    return agent.active === true || agent.active === "true";
+  }
+
+  const status = String(agent?.status || "").toLowerCase();
+
+  return ![
+    "offline",
+    "inactive",
+    "disabled",
+  ].includes(status);
+}
+
+function getAgentOptions(agents) {
+  const activeAgentOptions = (agents || [])
+    .filter(isActiveAgent)
+    .map((agent) => {
+      const role = getAgentRole(agent);
+
+      if (!role) {
+        return null;
+      }
+
+      return {
+        value: role,
+        label: agentRoleLabels[role] || agent.name || role,
+      };
+    })
+    .filter(Boolean);
+
+  if (activeAgentOptions.length === 0) {
+    return fallbackAgentOptions;
+  }
+
+  return Array.from(
+    new Map(
+      activeAgentOptions.map((option) => [
+        option.value,
+        option,
+      ])
+    ).values()
+  );
 }
 
 function formatNumber(value) {
@@ -456,6 +525,7 @@ function App() {
   );
   const selectedProjectId =
     form.projectId || dashboard.projects[0]?.id || "";
+  const agentOptions = getAgentOptions(dashboard.agents);
   const loadDashboard = dashboardStore.loadDashboard;
   const setDashboard = dashboardStore.updateDashboard;
   const setError = (message) => {
@@ -1015,17 +1085,14 @@ async function correctTask(taskId) {
                       onChange={handleChange}
                       className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5"
                     >
-                      <option value="frontend">
-                        Frontend Agent
-                      </option>
-
-                      <option value="backend">
-                        Backend Agent
-                      </option>
-
-                      <option value="qa">
-                        QA Agent
-                      </option>
+                      {agentOptions.map((agentOption) => (
+                        <option
+                          key={agentOption.value}
+                          value={agentOption.value}
+                        >
+                          {agentOption.label}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
