@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   CirclePlus,
   Clock3,
+  FolderGit2,
   History,
   LayoutDashboard,
   ListTodo,
@@ -68,6 +69,19 @@ const agentRoleLabels = {
   qa: "QA Agent",
   fullstack: "Fullstack Agent",
 };
+
+const tabs = [
+  {
+    id: "operations",
+    label: "Operaciones",
+    icon: LayoutDashboard,
+  },
+  {
+    id: "projects",
+    label: "Proyectos",
+    icon: FolderGit2,
+  },
+];
 
 const statusClasses = {
   backlog: "bg-slate-500/15 text-slate-300",
@@ -554,6 +568,8 @@ function MetricCard({
 }
 
 function App() {
+  const [activeTab, setActiveTab] =
+    useState("operations");
   const [form, setForm] = useState(initialForm);
   const [saving, setSaving] = useState(false);
   const [runningTaskId, setRunningTaskId] =
@@ -1069,7 +1085,35 @@ async function correctTask(taskId) {
         </div>
       </header>
 
+      <nav className="border-b border-white/10 bg-slate-950/70">
+        <div className="mx-auto flex max-w-7xl gap-2 px-6 py-3">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`inline-flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition sm:flex-none ${
+                  isActive
+                    ? "bg-sky-500 text-slate-950 shadow-lg shadow-sky-950/30"
+                    : "border border-white/10 bg-white/5 text-slate-300 hover:border-sky-400/50 hover:bg-sky-500/10 hover:text-white"
+                }`}
+                aria-current={isActive ? "page" : undefined}
+              >
+                <Icon size={16} />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+
       <main className="mx-auto max-w-7xl px-6 py-8">
+        {activeTab === "operations" ? (
+          <>
         <div className="mb-8">
           <div className="flex items-center gap-2 text-sky-400">
             <LayoutDashboard size={18} />
@@ -1920,7 +1964,43 @@ async function correctTask(taskId) {
             </section>
           </>
         )}
-        <ProjectManager onProjectsChanged={refreshDashboard} />
+          </>
+        ) : (
+          <section>
+            <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="flex items-center gap-2 text-cyan-400">
+                  <FolderGit2 size={18} />
+
+                  <span className="text-sm font-medium">
+                    Administracion
+                  </span>
+                </div>
+
+                <h2 className="mt-2 text-3xl font-bold text-white">
+                  Proyectos
+                </h2>
+
+                <p className="mt-2 max-w-3xl text-slate-400">
+                  Gestiona los proyectos disponibles para las nuevas
+                  tareas. Los cambios se reflejan en el selector de
+                  Operaciones al actualizarse el dashboard.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab("operations")}
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:border-sky-400/50 hover:bg-sky-500/10"
+              >
+                <LayoutDashboard size={16} />
+                Volver a Operaciones
+              </button>
+            </div>
+
+            <ProjectManager onProjectsChanged={refreshDashboard} />
+          </section>
+        )}
       </main>
 
       <footer className="mt-10 border-t border-white/10 py-6 text-center text-sm text-slate-500">
