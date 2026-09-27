@@ -23,6 +23,10 @@ function normalizeUsage(usage) {
   const cachedInputTokens = normalizeTokenValue(
     usage.cachedInputTokens
   );
+  const cacheCreationInputTokens =
+    normalizeTokenValue(
+      usage.cacheCreationInputTokens
+    );
   const totalTokens = normalizeTokenValue(
     usage.totalTokens
   );
@@ -30,6 +34,7 @@ function normalizeUsage(usage) {
   return {
     inputTokens,
     cachedInputTokens,
+    cacheCreationInputTokens,
     outputTokens,
     totalTokens:
       totalTokens ??
@@ -86,6 +91,10 @@ export async function finishTaskExecution({
   status,
   usage = null,
   model = null,
+  costUsd = null,
+  durationMs = null,
+  modelUsage = null,
+  permissionDenials = null,
   errorMessage = null,
 }) {
   if (!executionId) {
@@ -105,13 +114,20 @@ export async function finishTaskExecution({
           total_tokens = $6,
           model = COALESCE($7, model),
           error_message = $8,
+          cost_usd = $9,
+          cache_creation_input_tokens = $10,
+          model_usage = $11,
+          permission_denials = $12,
           finished_at = NOW(),
           duration_ms =
-            FLOOR(
-              EXTRACT(
-                EPOCH FROM (NOW() - started_at)
-              ) * 1000
-            )::BIGINT
+            COALESCE(
+              $13,
+              FLOOR(
+                EXTRACT(
+                  EPOCH FROM (NOW() - started_at)
+                ) * 1000
+              )::BIGINT
+            )
       WHERE id = $1
       RETURNING *
     `,
@@ -124,6 +140,15 @@ export async function finishTaskExecution({
       normalizedUsage.totalTokens,
       model,
       errorMessage,
+      costUsd,
+      normalizedUsage.cacheCreationInputTokens,
+      modelUsage
+        ? JSON.stringify(modelUsage)
+        : null,
+      permissionDenials
+        ? JSON.stringify(permissionDenials)
+        : null,
+      durationMs,
     ]
   );
 
@@ -147,8 +172,12 @@ export async function getTaskExecutionsSummary(
             status,
             input_tokens,
             cached_input_tokens,
+            cache_creation_input_tokens,
             output_tokens,
             total_tokens,
+            cost_usd,
+            model_usage,
+            permission_denials,
             started_at,
             finished_at,
             duration_ms,
@@ -169,6 +198,8 @@ export async function getTaskExecutionsSummary(
               AS total_input_tokens,
             COALESCE(SUM(cached_input_tokens), 0)::BIGINT
               AS total_cached_input_tokens,
+            COALESCE(SUM(cache_creation_input_tokens), 0)::BIGINT
+              AS total_cache_creation_input_tokens,
             COALESCE(
               SUM(
                 CASE
@@ -188,6 +219,11 @@ export async function getTaskExecutionsSummary(
               AS total_output_tokens,
             COALESCE(SUM(total_tokens), 0)::BIGINT
               AS total_tokens,
+            CASE
+              WHEN COUNT(cost_usd) > 0
+                THEN SUM(cost_usd)::NUMERIC
+              ELSE NULL
+            END AS total_cost_usd,
             COALESCE(SUM(duration_ms), 0)::BIGINT
               AS total_duration_ms
           FROM task_executions
@@ -210,6 +246,9 @@ export async function getTaskExecutionsSummary(
       totalCachedInputTokens: Number(
         summary.total_cached_input_tokens
       ),
+      totalCacheCreationInputTokens: Number(
+        summary.total_cache_creation_input_tokens
+      ),
       totalNonCachedInputTokens: Number(
         summary.total_non_cached_input_tokens
       ),
@@ -219,6 +258,10 @@ export async function getTaskExecutionsSummary(
       totalTokens: Number(
         summary.total_tokens
       ),
+      totalCostUsd:
+        summary.total_cost_usd === null
+          ? null
+          : Number(summary.total_cost_usd),
       totalDurationMs: Number(
         summary.total_duration_ms
       ),

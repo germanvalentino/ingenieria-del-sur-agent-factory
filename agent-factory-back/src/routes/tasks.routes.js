@@ -2,7 +2,12 @@ import { Router } from "express";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pool } from "../db.js";
-import { executeCodex } from "../services/codex.service.js";
+import {
+  assertValidProvider,
+  executeAgent,
+  getConfiguredModel,
+  getModelForHistory,
+} from "../services/agent-runner.service.js";
 import { runQaValidation } from "../services/qa.service.js";
 
 import {
@@ -25,6 +30,39 @@ const VALID_ROLES = [
 ];
 
 const MAX_AUTOMATIC_CORRECTIONS = 3;
+
+function assertProviderAllowedForRole({
+  assignedRole,
+  provider,
+}) {
+  const normalizedProvider =
+    assertValidProvider(provider);
+
+  if (
+    assignedRole === "qa" &&
+    normalizedProvider === "claude"
+  ) {
+    const error = new Error(
+      "QA debe conservar su proveedor actual; Claude no esta habilitado para tareas QA"
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return normalizedProvider;
+}
+
+function executionMetadata(result) {
+  return {
+    usage: result.usage,
+    model: result.model,
+    costUsd: result.costUsd,
+    durationMs: result.durationMs,
+    modelUsage: result.modelUsage,
+    permissionDenials:
+      result.permissionDenials,
+  };
+}
 
 function buildAllowedPathsPrompt({
   assignedRole,
@@ -229,6 +267,9 @@ async function runQaAttempt({
     await finishTaskExecution({
       executionId,
       status: "failed",
+      ...(error.agentResult
+        ? executionMetadata(error.agentResult)
+        : {}),
       errorMessage: error.message,
     });
 
@@ -244,6 +285,11 @@ async function runCorrectionAttempt({
   statusBeforeCorrection,
 }) {
   let executionId;
+  const taskProvider =
+    assertProviderAllowedForRole({
+      assignedRole: task.assigned_role,
+      provider: task.provider,
+    });
 
   await pool.query(
     `
@@ -263,13 +309,18 @@ async function runCorrectionAttempt({
     taskId: task.id,
     agentId: agent.id,
     executionType: "correction",
-    provider: agent.provider,
+    provider: taskProvider,
+    model: getModelForHistory({
+      provider: taskProvider,
+      model: task.model,
+    }),
   });
 
   executionId = execution.id;
 
   try {
-    const correctionResult = await executeCodex({
+    const correctionResult = await executeAgent({
+      provider: taskProvider,
       workingDirectory: task.agent_working_path,
       prompt: buildCorrectionPrompt({
         agent,
@@ -278,6 +329,7 @@ async function runCorrectionAttempt({
         attemptNumber,
       }),
       sandbox: "workspace-write",
+      model: task.model,
     });
 
     const gitStatus = await getWorktreeStatus(
@@ -326,8 +378,7 @@ async function runCorrectionAttempt({
     await finishTaskExecution({
       executionId,
       status: leftChanges ? "passed" : "failed",
-      usage: correctionResult.usage,
-      model: correctionResult.model,
+      ...executionMetadata(correctionResult),
       errorMessage: leftChanges
         ? null
         : "La correcciÃ³n automÃ¡tica no dejÃ³ cambios nuevos.",
@@ -342,6 +393,9 @@ async function runCorrectionAttempt({
     await finishTaskExecution({
       executionId,
       status: "failed",
+      ...(error.agentResult
+        ? executionMetadata(error.agentResult)
+        : {}),
       errorMessage: error.message,
     });
 
@@ -355,6 +409,7 @@ router.post("/", async (req, res) => {
     title,
     description = "",
     assignedRole,
+    provider = "codex",
   } = req.body;
 
   if (
@@ -373,6 +428,20 @@ router.post("/", async (req, res) => {
     return res.status(400).json({
       status: "error",
       message: "El rol asignado no es válido",
+    });
+  }
+
+  let taskProvider;
+
+  try {
+    taskProvider = assertProviderAllowedForRole({
+      assignedRole,
+      provider,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      status: "error",
+      message: error.message,
     });
   }
 
@@ -424,7 +493,9 @@ router.post("/", async (req, res) => {
           assigned_role,
           status,
           branch_name,
-          base_branch
+          base_branch,
+          provider,
+          model
         )
         SELECT
           p.id,
@@ -436,7 +507,9 @@ router.post("/", async (req, res) => {
           COALESCE(
             NULLIF(TRIM(p.default_branch), ''),
             'main'
-          )
+          ),
+          $6,
+          $7
         FROM projects p
         WHERE p.id = $1
           AND p.active = TRUE
@@ -465,6 +538,8 @@ router.post("/", async (req, res) => {
           assignedRole,
           title.trim()
         ),
+        taskProvider,
+        getConfiguredModel(taskProvider),
       ]
     );
 
@@ -595,6 +670,7 @@ router.post("/:id/run", async (req, res) => {
   let agentId;
   let worktree;
   let executionId;
+  let taskWasMarkedRunning = false;
 
   try {
     const taskResult = await pool.query(
@@ -628,6 +704,12 @@ router.post("/:id/run", async (req, res) => {
           `La tarea está en estado ${task.status}`,
       });
     }
+
+    const taskProvider =
+      assertProviderAllowedForRole({
+        assignedRole: task.assigned_role,
+        provider: task.provider,
+      });
 
     const targetDirectory =
       task.assigned_role === "frontend"
@@ -778,6 +860,7 @@ WHERE id = $1
   worktree.backendWorkingPath || null,
 ]
     );
+    taskWasMarkedRunning = true;
 
     await pool.query(
       `
@@ -794,7 +877,11 @@ WHERE id = $1
         taskId: task.id,
         agentId: agent.id,
         executionType: "development",
-        provider: agent.provider,
+        provider: taskProvider,
+        model: getModelForHistory({
+          provider: taskProvider,
+          model: task.model,
+        }),
       });
 
     executionId = execution.id;
@@ -843,10 +930,12 @@ REGLAS OBLIGATORIAS:
 - Conservá cualquier trabajo parcial que sea correcto.
 `;
 
-    const result = await executeCodex({
+    const result = await executeAgent({
+      provider: taskProvider,
       workingDirectory:
         worktree.agentWorkingPath,
       prompt,
+      model: task.model,
     });
 
     const gitStatus =
@@ -883,8 +972,7 @@ REGLAS OBLIGATORIAS:
     await finishTaskExecution({
       executionId,
       status: "passed",
-      usage: result.usage,
-      model: result.model,
+      ...executionMetadata(result),
     });
     executionId = null;
 
@@ -900,8 +988,16 @@ REGLAS OBLIGATORIAS:
 
     res.json(updatedTask.rows[0]);
   } catch (error) {
+    if (error.statusCode && !taskWasMarkedRunning) {
+      return res.status(error.statusCode).json({
+        status: "error",
+        message: error.message,
+      });
+    }
+    const responseStatus = error.statusCode || 500;
+
     console.error(
-      "Error ejecutando Codex:",
+      "Error ejecutando agente:",
       error
     );
 
@@ -923,6 +1019,9 @@ REGLAS OBLIGATORIAS:
     await finishTaskExecution({
       executionId,
       status: "failed",
+      ...(error.agentResult
+        ? executionMetadata(error.agentResult)
+        : {}),
       errorMessage: error.message,
     });
 
@@ -938,7 +1037,7 @@ REGLAS OBLIGATORIAS:
       );
     }
 
-    res.status(500).json({
+    res.status(responseStatus).json({
       status: "error",
       message: error.message,
     });
@@ -1410,6 +1509,7 @@ router.post(
   async (req, res) => {
     let agentId;
     let executionId;
+    let taskWasMarkedRunning = false;
 
     try {
       const taskResult = await pool.query(
@@ -1471,6 +1571,12 @@ router.post(
         });
       }
 
+      const taskProvider =
+        assertProviderAllowedForRole({
+          assignedRole: task.assigned_role,
+          provider: task.provider,
+        });
+
       const agentResult = await pool.query(
         `
           SELECT *
@@ -1507,6 +1613,7 @@ router.post(
         `,
         [task.id]
       );
+      taskWasMarkedRunning = true;
 
       await pool.query(
         `
@@ -1523,7 +1630,12 @@ router.post(
           taskId: task.id,
           agentId: agent.id,
           executionType: "correction",
-          provider: agent.provider,
+          provider: taskProvider,
+          model:
+            getModelForHistory({
+              provider: taskProvider,
+              model: task.model,
+            }),
         });
 
       executionId = execution.id;
@@ -1590,11 +1702,13 @@ ${correctionAllowedPathsPrompt}
 `;
 
       const correctionResult =
-        await executeCodex({
+        await executeAgent({
+          provider: taskProvider,
           workingDirectory:
             task.agent_working_path,
           prompt,
           sandbox: "workspace-write",
+          model: task.model,
         });
 
       const gitStatus =
@@ -1645,8 +1759,7 @@ correction_count =
       await finishTaskExecution({
         executionId,
         status: "passed",
-        usage: correctionResult.usage,
-        model: correctionResult.model,
+        ...executionMetadata(correctionResult),
       });
       executionId = null;
 
@@ -1662,6 +1775,14 @@ correction_count =
 
       res.json(updatedTask.rows[0]);
     } catch (error) {
+      if (error.statusCode && !taskWasMarkedRunning) {
+        return res.status(error.statusCode).json({
+          status: "error",
+          message: error.message,
+        });
+      }
+      const responseStatus = error.statusCode || 500;
+
       console.error(
         "Error corrigiendo tarea:",
         error
@@ -1693,6 +1814,9 @@ correction_count =
       await finishTaskExecution({
         executionId,
         status: "failed",
+        ...(error.agentResult
+          ? executionMetadata(error.agentResult)
+          : {}),
         errorMessage: error.message,
       });
 
@@ -1708,7 +1832,7 @@ correction_count =
         );
       }
 
-      res.status(500).json({
+      res.status(responseStatus).json({
         status: "error",
         message: error.message,
       });

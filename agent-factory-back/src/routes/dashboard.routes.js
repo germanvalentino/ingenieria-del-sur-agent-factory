@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { pool } from "../db.js";
+import { getDisplayModel } from "../services/agent-runner.service.js";
 
 const router = Router();
 
@@ -44,6 +45,11 @@ router.get("/", async (req, res) => {
       projects: projectsResult.rows,
       agents: agentsResult.rows,
       tasks,
+      providerConfig: {
+        claude: {
+          model: getDisplayModel("claude"),
+        },
+      },
       metrics: {
         totalTasks: tasks.length,
         queuedTasks: tasks.filter(

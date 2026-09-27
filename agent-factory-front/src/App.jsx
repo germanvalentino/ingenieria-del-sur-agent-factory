@@ -32,6 +32,7 @@ const initialForm = {
   title: "",
   description: "",
   assignedRole: "backend",
+  provider: "codex",
 };
 
 const initialDashboard = {
@@ -39,6 +40,7 @@ const initialDashboard = {
   projects: [],
   agents: [],
   tasks: [],
+  providerConfig: {},
   metrics: {
     totalTasks: 0,
     queuedTasks: 0,
@@ -93,6 +95,12 @@ const statusClasses = {
 };
 
 const numberFormatter = new Intl.NumberFormat("es-AR");
+const costFormatter = new Intl.NumberFormat("es-AR", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 6,
+});
 
 const executionStatusClasses = {
   completed: "bg-emerald-500/15 text-emerald-300",
@@ -185,6 +193,58 @@ function formatNumber(value) {
   }
 
   return numberFormatter.format(numberValue);
+}
+
+function getProviderLabel(provider) {
+  const normalized = String(provider || "").toLowerCase();
+
+  if (normalized === "claude") {
+    return "Claude";
+  }
+
+  if (normalized === "codex") {
+    return "Codex";
+  }
+
+  return provider || "Sin datos";
+}
+
+function getConfiguredModelLabel(
+  provider,
+  providerConfig,
+) {
+  const normalized = String(provider || "").toLowerCase();
+
+  if (normalized !== "claude") {
+    return null;
+  }
+
+  return (
+    providerConfig?.claude?.model ||
+    providerConfig?.claudeModel ||
+    null
+  );
+}
+
+function isProviderAllowedForRole(role, provider) {
+  return !(
+    String(role || "").toLowerCase() === "qa" &&
+    String(provider || "").toLowerCase() === "claude"
+  );
+}
+
+function formatCost(value) {
+  if (value === null || value === undefined || value === "") {
+    return "Sin datos";
+  }
+
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue)) {
+    return "Sin datos";
+  }
+
+  return costFormatter.format(numberValue);
 }
 
 function formatDateTime(value) {
@@ -336,6 +396,15 @@ function getDurationMs(execution) {
   return pickValue(execution, ["duration", "elapsed"]);
 }
 
+function getCostUsd(execution) {
+  return pickValue(execution, [
+    "cost_usd",
+    "costUsd",
+    "total_cost_usd",
+    "totalCostUsd",
+  ]);
+}
+
 function sumKnownValues(values) {
   const numbers = values
     .filter((value) => value !== null && value !== undefined && value !== "")
@@ -382,6 +451,13 @@ function normalizeTaskHistory(data) {
       totalTokens:
         pickValue(summary, ["total_tokens", "totalTokens"]) ??
         sumKnownValues(executions.map(getDisplayTotalTokens)),
+      costUsd:
+        pickValue(summary, [
+          "total_cost_usd",
+          "totalCostUsd",
+          "cost_usd",
+          "costUsd",
+        ]) ?? sumKnownValues(executions.map(getCostUsd)),
       durationMs:
         pickValue(summary, [
           "duration_ms",
@@ -738,10 +814,23 @@ function App() {
   function handleChange(event) {
     const { name, value } = event.target;
 
-    setForm((current) => ({
-      ...current,
-      [name]: value,
-    }));
+    setForm((current) => {
+      const next = {
+        ...current,
+        [name]: value,
+      };
+
+      if (
+        !isProviderAllowedForRole(
+          next.assignedRole,
+          next.provider,
+        )
+      ) {
+        next.provider = "codex";
+      }
+
+      return next;
+    });
   }
 
   async function handleSubmit(event) {
@@ -1224,6 +1313,7 @@ async function correctTask(taskId) {
                       name="projectId"
                       value={selectedProjectId}
                       onChange={handleChange}
+                      disabled={saving}
                       className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5"
                     >
                       {dashboard.projects.map(
@@ -1248,6 +1338,7 @@ async function correctTask(taskId) {
                       name="title"
                       value={form.title}
                       onChange={handleChange}
+                      disabled={saving}
                       placeholder="Ej: Crear pantalla de proyectos"
                       className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5 outline-none focus:border-sky-500"
                     />
@@ -1262,6 +1353,7 @@ async function correctTask(taskId) {
                       name="description"
                       value={form.description}
                       onChange={handleChange}
+                      disabled={saving}
                       rows="4"
                       placeholder="Detalle y criterios de aceptación"
                       className="w-full resize-none rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5 outline-none focus:border-sky-500"
@@ -1277,6 +1369,7 @@ async function correctTask(taskId) {
                       name="assignedRole"
                       value={form.assignedRole}
                       onChange={handleChange}
+                      disabled={saving}
                       className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5"
                     >
                       {agentOptions.map((agentOption) => (
@@ -1288,6 +1381,56 @@ async function correctTask(taskId) {
                         </option>
                       ))}
                     </select>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-sm text-slate-400">
+                      Proveedor
+                    </label>
+
+                    <select
+                      name="provider"
+                      value={form.provider}
+                      onChange={handleChange}
+                      disabled={saving}
+                      className="w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2.5"
+                    >
+                      <option value="codex">
+                        Codex
+                      </option>
+                      <option
+                        value="claude"
+                        disabled={
+                          !isProviderAllowedForRole(
+                            form.assignedRole,
+                            "claude",
+                          )
+                        }
+                      >
+                        Claude
+                      </option>
+                    </select>
+
+                    {!isProviderAllowedForRole(
+                      form.assignedRole,
+                      "claude",
+                    ) && (
+                      <p className="mt-2 text-xs text-slate-500">
+                        QA conserva su proveedor actual.
+                      </p>
+                    )}
+
+                    {form.provider === "claude" && (
+                      <p className="mt-2 text-xs text-slate-500">
+                        Modelo:{" "}
+                        <span className="text-slate-300">
+                          {getConfiguredModelLabel(
+                            form.provider,
+                            dashboard.providerConfig,
+                          ) || "Sin datos"}
+                        </span>
+                      </p>
+                    )}
                   </div>
 
                   <button
@@ -1344,6 +1487,18 @@ async function correctTask(taskId) {
                             <span className="min-w-0 break-words text-xs uppercase text-slate-500">
                               {task.assigned_role}
                             </span>
+
+                            <span className="min-w-0 break-words text-xs text-sky-300">
+                              {getProviderLabel(
+                                task.provider,
+                              )}
+                            </span>
+
+                            {task.model && (
+                              <span className="min-w-0 break-words text-xs text-slate-500">
+                                {task.model}
+                              </span>
+                            )}
 
                             {getCorrectionAttempts(task) > 0 && (
                               <span className="min-w-0 break-words text-xs text-amber-300">
@@ -1553,6 +1708,18 @@ async function correctTask(taskId) {
 
                                           <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
                                             <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
+                                              Costo total
+                                            </p>
+                                            <strong className="mt-1 block max-w-full break-words text-sm tabular-nums text-white">
+                                              {formatCost(
+                                                history.summary
+                                                  .costUsd,
+                                              )}
+                                            </strong>
+                                          </div>
+
+                                          <div className="min-w-0 rounded-lg border border-white/10 bg-white/5 p-3">
+                                            <p className="line-clamp-2 break-normal text-[11px] uppercase leading-tight text-slate-500 [overflow-wrap:normal] [word-break:normal]">
                                               Duración total
                                             </p>
                                             <strong className="mt-1 block max-w-full break-words text-sm tabular-nums text-white">
@@ -1649,20 +1816,18 @@ async function correctTask(taskId) {
 
                                                     <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(180px,100%),1fr))] gap-2 text-xs text-slate-400">
                                                       <p className="min-w-0 break-words">
-                                                        Agente/proveedor:{" "}
+                                                        Proveedor:{" "}
                                                         <span className="text-slate-200">
-                                                          {pickValue(
-                                                            execution,
-                                                            [
-                                                              "agent_name",
-                                                              "agentName",
-                                                              "agent",
-                                                              "provider_name",
-                                                              "providerName",
-                                                              "provider",
-                                                            ],
-                                                          ) ||
-                                                            "Sin datos"}
+                                                          {getProviderLabel(
+                                                            pickValue(
+                                                              execution,
+                                                              [
+                                                                "provider",
+                                                                "provider_name",
+                                                                "providerName",
+                                                              ],
+                                                            ),
+                                                          )}
                                                         </span>
                                                       </p>
 
@@ -1678,6 +1843,17 @@ async function correctTask(taskId) {
                                                             ],
                                                           ) ||
                                                             "Sin datos"}
+                                                        </span>
+                                                      </p>
+
+                                                      <p className="min-w-0 break-words">
+                                                        Costo:{" "}
+                                                        <span className="tabular-nums text-slate-200">
+                                                          {formatCost(
+                                                            getCostUsd(
+                                                              execution,
+                                                            ),
+                                                          )}
                                                         </span>
                                                       </p>
 
@@ -1910,7 +2086,10 @@ async function correctTask(taskId) {
                                 className="animate-spin"
                               />
 
-                              Codex trabajando
+                              {getProviderLabel(
+                                task.provider,
+                              )}{" "}
+                              trabajando
                             </span>
                           )}
                         </div>
