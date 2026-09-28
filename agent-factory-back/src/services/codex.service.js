@@ -5,7 +5,16 @@ import path from "node:path";
 const MAX_EXECUTION_TIME = 15 * 60 * 1000;
 
 function toNumberOrNull(value) {
-  return Number.isFinite(value) ? value : null;
+  if (Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
 }
 
 function firstNumber(...values) {
@@ -90,6 +99,9 @@ function parseCodexJsonOutput(output) {
         event.model ??
         event.provider_model ??
         event.providerModel ??
+        event.turn?.model ??
+        event.response?.model ??
+        event.item?.model ??
         model;
 
       if (
@@ -100,8 +112,18 @@ function parseCodexJsonOutput(output) {
         agentMessages.push(event.item.text);
       }
 
-      if (event.type === "turn.completed") {
-        usage = normalizeUsage(event.usage);
+      const eventUsage =
+        event.usage ??
+        event.turn?.usage ??
+        event.response?.usage ??
+        event.item?.usage ??
+        null;
+
+      if (eventUsage) {
+        const normalized = normalizeUsage(eventUsage);
+        if (normalized) {
+          usage = normalized;
+        }
       }
 
       if (
@@ -114,7 +136,9 @@ function parseCodexJsonOutput(output) {
           streamError;
       }
     } catch {
-      return null;
+      // Codex puede escribir alguna linea informativa junto al JSONL.
+      // La ignoramos y conservamos los eventos JSON validos.
+      continue;
     }
   }
 
@@ -136,6 +160,7 @@ export function executeCodex({
   workingDirectory,
   prompt,
   sandbox = "workspace-write",
+  model = null,
 })  {
   return new Promise((resolve, reject) => {
     if (!path.isAbsolute(workingDirectory)) {
@@ -178,20 +203,30 @@ export function executeCodex({
     return;
     }
 
-    const child = spawn(
-      "codex",
-      [
-        "exec",
-        "--json",
+    const configuredModel =
+      model || process.env.CODEX_MODEL?.trim() || null;
+    const startedAt = Date.now();
+    const args = [
+      "exec",
+      "--json",
         "--color",
         "never",
         "--ephemeral",
         "--sandbox",
         sandbox,
-        "--cd",
-        resolvedDirectory,
-        "-",
-      ],
+      "--cd",
+      resolvedDirectory,
+    ];
+
+    if (configuredModel) {
+      args.push("--model", configuredModel);
+    }
+
+    args.push("-");
+
+    const child = spawn(
+      "codex",
+      args,
       {
         cwd: resolvedDirectory,
         shell: true,
@@ -251,7 +286,14 @@ export function executeCodex({
           stdout.trim() ||
           stderr.trim(),
         usage: parsedOutput?.usage ?? null,
-        model: parsedOutput?.model ?? null,
+        model:
+          parsedOutput?.model ??
+          configuredModel ??
+          null,
+        costUsd: null,
+        durationMs: Date.now() - startedAt,
+        modelUsage: null,
+        permissionDenials: null,
       });
     });
 

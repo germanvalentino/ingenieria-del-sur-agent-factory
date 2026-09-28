@@ -107,5 +107,9 @@ export function executeAgent({
     workingDirectory,
     prompt,
     sandbox,
+    model: getExecutionModel({
+      provider: normalized,
+      model,
+    }),
   });
 }
