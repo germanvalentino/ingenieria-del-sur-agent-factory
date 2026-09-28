@@ -1420,6 +1420,12 @@ async function correctTask(taskId) {
                       </p>
                     )}
 
+                    <p className="mt-2 text-xs text-slate-500">
+                      {form.provider === "claude"
+                        ? "Claude utiliza facturación API de Anthropic."
+                        : "Codex utiliza la sesión configurada de ChatGPT."}
+                    </p>
+
                     {form.provider === "claude" && (
                       <p className="mt-2 text-xs text-slate-500">
                         Modelo:{" "}
