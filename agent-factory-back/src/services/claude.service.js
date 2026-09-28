@@ -437,6 +437,8 @@ export async function validateClaudeInstallation(
 }
 
 function createClaudeSandboxSettings(workingDirectory) {
+  const nativeWindows = process.platform === "win32";
+
   // Riesgo pendiente: Windows nativo no ofrece sandbox estricto equivalente a WSL2.
   const settingsDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), "agent-factory-claude-")
@@ -451,9 +453,9 @@ function createClaudeSandboxSettings(workingDirectory) {
     JSON.stringify(
       {
         sandbox: {
-          enabled: true,
-          failIfUnavailable: true,
-          autoAllowBashIfSandboxed: true,
+          enabled: !nativeWindows,
+          failIfUnavailable: !nativeWindows,
+          autoAllowBashIfSandboxed: !nativeWindows,
           filesystem: {
             strictAllowlist: true,
             allowRead: [workingDirectory],
@@ -686,6 +688,7 @@ export async function executeClaude({
         {
           cwd: resolvedDirectory,
           env: claudeEnvironment(),
+          stdio: ["ignore", "pipe", "pipe"],
         }
       );
     } catch (error) {
