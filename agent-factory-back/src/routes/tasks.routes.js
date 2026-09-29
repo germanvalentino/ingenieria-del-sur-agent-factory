@@ -4,9 +4,14 @@ import path from "node:path";
 import { pool } from "../db.js";
 import {
   assertValidProvider,
+  buildExecutionRequirements,
+  describeProviderFallbackEvent,
   executeAgent,
+  getAlternativeProvider,
+  getProviderCapabilitySupport,
   getConfiguredModel,
   getModelForHistory,
+  getProviderFailure,
 } from "../services/agent-runner.service.js";
 import { runQaValidation } from "../services/qa.service.js";
 
@@ -64,6 +69,216 @@ function executionMetadata(result) {
   };
 }
 
+function decorateFallbackError(error, fallbackEvent) {
+  error.fallbackEvent = fallbackEvent;
+  return error;
+}
+
+function fallbackEventNotice(fallbackEvent) {
+  if (!fallbackEvent) {
+    return null;
+  }
+
+  return describeProviderFallbackEvent({
+    originalProvider: fallbackEvent.originalProvider,
+    reason: fallbackEvent.reason,
+    alternativeProvider:
+      fallbackEvent.alternativeProvider,
+    status: fallbackEvent.status,
+    detail: fallbackEvent.detail,
+  });
+}
+
+async function appendFallbackEventToExecution({
+  executionId,
+  fallbackEvent,
+}) {
+  if (!executionId || !fallbackEvent) {
+    return;
+  }
+
+  await pool.query(
+    `
+      UPDATE task_executions
+      SET error_message =
+        CONCAT_WS(
+          E'\\n\\n',
+          error_message,
+          $2
+        )
+      WHERE id = $1
+    `,
+    [executionId, fallbackEventNotice(fallbackEvent)]
+  );
+}
+
+async function runProviderBackedAttempt({
+  taskId,
+  agentId,
+  executionType,
+  originalProvider,
+  capability,
+  requiredTools = [],
+  sandbox = "workspace-write",
+  permissions = [],
+  model = null,
+  runWithProvider,
+  getStatus = () => "passed",
+  getMetadata = executionMetadata,
+}) {
+  const primaryProvider =
+    assertValidProvider(originalProvider);
+  const executionRequirements =
+    buildExecutionRequirements({
+      capability,
+      requiredTools,
+      sandbox,
+      permissions,
+    });
+
+  async function runSingleProvider(provider) {
+    const execution = await startTaskExecution({
+      taskId,
+      agentId,
+      executionType,
+      provider,
+      model: getModelForHistory({
+        provider,
+        model:
+          provider === primaryProvider
+            ? model
+            : null,
+      }),
+    });
+
+    try {
+      const result = await runWithProvider(provider);
+
+      await finishTaskExecution({
+        executionId: execution.id,
+        status: getStatus(result),
+        ...getMetadata(result),
+      });
+
+      return {
+        result,
+        executionId: execution.id,
+      };
+    } catch (error) {
+      await finishTaskExecution({
+        executionId: execution.id,
+        status: "failed",
+        ...(error.agentResult
+          ? executionMetadata(error.agentResult)
+          : {}),
+        errorMessage: error.message,
+      });
+
+      error.executionId = execution.id;
+
+      throw error;
+    }
+  }
+
+  try {
+    const primaryAttempt = await runSingleProvider(
+      primaryProvider
+    );
+
+    return {
+      result: primaryAttempt.result,
+      provider: primaryProvider,
+      executionId: primaryAttempt.executionId,
+      fallbackEvent: null,
+    };
+  } catch (primaryError) {
+    const providerFailure =
+      getProviderFailure(primaryError);
+
+    if (!providerFailure.isProviderFailure) {
+      throw primaryError;
+    }
+
+    const alternativeProvider =
+      getAlternativeProvider(primaryProvider);
+    const fallbackEvent = {
+      originalProvider: primaryProvider,
+      reason:
+        providerFailure.reason ||
+        "falla de proveedor",
+      alternativeProvider,
+      status: "iniciado",
+      detail: null,
+    };
+
+    const capabilitySupport =
+      getProviderCapabilitySupport({
+        provider: alternativeProvider,
+        executionRequirements,
+      });
+
+    if (!capabilitySupport.supported) {
+      fallbackEvent.status = "omitido";
+      fallbackEvent.detail =
+        capabilitySupport.reason ||
+        "El proveedor alternativo no soporta la capacidad requerida.";
+      const error = new Error(
+        fallbackEventNotice(fallbackEvent)
+      );
+      await appendFallbackEventToExecution({
+        executionId: primaryError.executionId,
+        fallbackEvent,
+      });
+      throw decorateFallbackError(
+        error,
+        fallbackEvent
+      );
+    }
+
+    try {
+      const fallbackAttempt = await runSingleProvider(
+        alternativeProvider
+      );
+
+      fallbackEvent.status = "exitoso";
+      await appendFallbackEventToExecution({
+        executionId: primaryError.executionId,
+        fallbackEvent,
+      });
+
+      return {
+        result: fallbackAttempt.result,
+        provider: alternativeProvider,
+        executionId: fallbackAttempt.executionId,
+        fallbackEvent,
+      };
+    } catch (fallbackError) {
+      const fallbackFailure =
+        getProviderFailure(fallbackError);
+
+      fallbackEvent.status = "fallido";
+      fallbackEvent.detail =
+        fallbackFailure.isProviderFailure
+          ? fallbackFailure.reason ||
+            fallbackError.message
+          : fallbackError.message;
+      await appendFallbackEventToExecution({
+        executionId: primaryError.executionId,
+        fallbackEvent,
+      });
+
+      const error = new Error(
+        fallbackEventNotice(fallbackEvent)
+      );
+      error.agentResult = fallbackError.agentResult;
+      throw decorateFallbackError(
+        error,
+        fallbackEvent
+      );
+    }
+  }
+}
+
 function buildAllowedPathsPrompt({
   assignedRole,
   frontendWorkingDirectory,
@@ -116,7 +331,7 @@ function getQaProjectDirectories(task) {
 
 function normalizeQaFindings(summary) {
   const qaReview = String(summary || "")
-    .split("=== REVISIÃ“N DE CÃ“DIGO CODEX ===")
+    .split(/===\s+REVISION DE CODIGO (?:CODEX|CLAUDE)\s+===/i)
     .pop();
   const findingsMatch = qaReview.match(
     /HALLAZGOS:\s*([\s\S]*?)(?:\n\s*RIESGOS:|$)/i
@@ -187,8 +402,6 @@ async function runQaAttempt({
   qaAgent,
   attemptNumber,
 }) {
-  let executionId;
-
   await pool.query(
     `
       UPDATE tasks
@@ -203,32 +416,51 @@ async function runQaAttempt({
     [task.id]
   );
 
-  const execution = await startTaskExecution({
-    taskId: task.id,
-    agentId: qaAgent.id,
-    executionType: "qa",
-    provider: qaAgent.provider,
-  });
-
-  executionId = execution.id;
-
   try {
-    const qaResult = await runQaValidation({
-      workingDirectory: task.agent_working_path,
-      projectDirectories:
-        getQaProjectDirectories(task),
-      baseBranch: task.base_branch || "main",
-      taskTitle: task.title,
-      taskDescription: task.description,
-      correctionFeedback:
-        task.correction_feedback,
-    });
+    const providerAttempt =
+      await runProviderBackedAttempt({
+        taskId: task.id,
+        agentId: qaAgent.id,
+        executionType: "qa",
+        originalProvider:
+          qaAgent.provider || "codex",
+        capability: "qa",
+        sandbox: "read-only",
+        runWithProvider: (provider) =>
+          runQaValidation({
+            workingDirectory:
+              task.agent_working_path,
+            projectDirectories:
+              getQaProjectDirectories(task),
+            baseBranch:
+              task.base_branch || "main",
+            provider,
+            taskTitle: task.title,
+            taskDescription:
+              task.description,
+            correctionFeedback:
+              task.correction_feedback,
+          }),
+        getStatus: (qaResult) =>
+          qaResult.status,
+        getMetadata: (qaResult) => ({
+          usage: qaResult.aiUsage,
+          model: qaResult.aiModel,
+        }),
+      });
+    const qaResult = providerAttempt.result;
 
     const finalSummary = [
-      `QA automÃ¡tico intento ${attemptNumber}`,
+      `QA automatico intento ${attemptNumber}`,
       "",
+      fallbackEventNotice(
+        providerAttempt.fallbackEvent
+      ),
+      providerAttempt.fallbackEvent ? "" : null,
       qaResult.summary,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const updatedTaskResult =
       await pool.query(
@@ -249,13 +481,6 @@ async function runQaAttempt({
         ]
       );
 
-    await finishTaskExecution({
-      executionId,
-      status: qaResult.status,
-      usage: qaResult.codexUsage,
-      model: qaResult.codexModel,
-    });
-
     return {
       task: updatedTaskResult.rows[0],
       qaResult: {
@@ -264,15 +489,6 @@ async function runQaAttempt({
       },
     };
   } catch (error) {
-    await finishTaskExecution({
-      executionId,
-      status: "failed",
-      ...(error.agentResult
-        ? executionMetadata(error.agentResult)
-        : {}),
-      errorMessage: error.message,
-    });
-
     throw error;
   }
 }
@@ -284,7 +500,6 @@ async function runCorrectionAttempt({
   attemptNumber,
   statusBeforeCorrection,
 }) {
-  let executionId;
   const taskProvider =
     assertProviderAllowedForRole({
       assignedRole: task.assigned_role,
@@ -305,32 +520,37 @@ async function runCorrectionAttempt({
     [task.id]
   );
 
-  const execution = await startTaskExecution({
-    taskId: task.id,
-    agentId: agent.id,
-    executionType: "correction",
-    provider: taskProvider,
-    model: getModelForHistory({
-      provider: taskProvider,
-      model: task.model,
-    }),
-  });
-
-  executionId = execution.id;
-
   try {
-    const correctionResult = await executeAgent({
-      provider: taskProvider,
-      workingDirectory: task.agent_working_path,
-      prompt: buildCorrectionPrompt({
-        agent,
-        task,
-        qaSummary,
-        attemptNumber,
-      }),
-      sandbox: "workspace-write",
-      model: task.model,
+    const correctionPrompt = buildCorrectionPrompt({
+      agent,
+      task,
+      qaSummary,
+      attemptNumber,
     });
+    const providerAttempt =
+      await runProviderBackedAttempt({
+        taskId: task.id,
+        agentId: agent.id,
+        executionType: "correction",
+        originalProvider: taskProvider,
+        capability: "correction",
+        sandbox: "workspace-write",
+        model: task.model,
+        runWithProvider: (provider) =>
+          executeAgent({
+            provider,
+            workingDirectory:
+              task.agent_working_path,
+            prompt: correctionPrompt,
+            sandbox: "workspace-write",
+            model:
+              provider === taskProvider
+                ? task.model
+                : null,
+          }),
+      });
+    const correctionResult =
+      providerAttempt.result;
 
     const gitStatus = await getWorktreeStatus(
       task.worktree_path
@@ -338,16 +558,34 @@ async function runCorrectionAttempt({
     const leftChanges =
       Boolean(gitStatus) &&
       gitStatus !== statusBeforeCorrection;
+    const noChangesErrorMessage =
+      "La correccion automatica finalizo sin dejar cambios en el worktree.";
+
+    if (!leftChanges) {
+      await finishTaskExecution({
+        executionId: providerAttempt.executionId,
+        status: "failed",
+        ...executionMetadata(correctionResult),
+        errorMessage: noChangesErrorMessage,
+      });
+    }
 
     const correctionSummary = [
       "",
       "",
-      `=== CORRECCIÃ“N AUTOMÃTICA ${attemptNumber} DE ${MAX_AUTOMATIC_CORRECTIONS} ===`,
+      fallbackEventNotice(
+        providerAttempt.fallbackEvent
+      ),
+      providerAttempt.fallbackEvent ? "" : null,
+      `=== CORRECCION AUTOMATICA ${attemptNumber} DE ${MAX_AUTOMATIC_CORRECTIONS} ===`,
       correctionResult.output,
       "",
       "ESTADO DEL WORKTREE:",
       gitStatus || "Sin cambios pendientes.",
-    ].join("\n");
+      leftChanges ? null : noChangesErrorMessage,
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const updatedTaskResult =
       await pool.query(
@@ -375,30 +613,12 @@ async function runCorrectionAttempt({
         ]
       );
 
-    await finishTaskExecution({
-      executionId,
-      status: leftChanges ? "passed" : "failed",
-      ...executionMetadata(correctionResult),
-      errorMessage: leftChanges
-        ? null
-        : "La correcciÃ³n automÃ¡tica no dejÃ³ cambios nuevos.",
-    });
-
     return {
       task: updatedTaskResult.rows[0],
       gitStatus,
       leftChanges,
     };
   } catch (error) {
-    await finishTaskExecution({
-      executionId,
-      status: "failed",
-      ...(error.agentResult
-        ? executionMetadata(error.agentResult)
-        : {}),
-      errorMessage: error.message,
-    });
-
     throw error;
   }
 }
@@ -872,20 +1092,6 @@ WHERE id = $1
       [agent.id]
     );
 
-    const execution =
-      await startTaskExecution({
-        taskId: task.id,
-        agentId: agent.id,
-        executionType: "development",
-        provider: taskProvider,
-        model: getModelForHistory({
-          provider: taskProvider,
-          model: task.model,
-        }),
-      });
-
-    executionId = execution.id;
-
     const prompt = `
 Sos el ${agent.name} de Ingeniería del Sur.
 
@@ -930,13 +1136,28 @@ REGLAS OBLIGATORIAS:
 - Conservá cualquier trabajo parcial que sea correcto.
 `;
 
-    const result = await executeAgent({
-      provider: taskProvider,
-      workingDirectory:
-        worktree.agentWorkingPath,
-      prompt,
-      model: task.model,
-    });
+    const providerAttempt =
+      await runProviderBackedAttempt({
+        taskId: task.id,
+        agentId: agent.id,
+        executionType: "development",
+        originalProvider: taskProvider,
+        capability: "development",
+        sandbox: "workspace-write",
+        model: task.model,
+        runWithProvider: (provider) =>
+          executeAgent({
+            provider,
+            workingDirectory:
+              worktree.agentWorkingPath,
+            prompt,
+            model:
+              provider === taskProvider
+                ? task.model
+                : null,
+          }),
+      });
+    const result = providerAttempt.result;
 
     const gitStatus =
       await getWorktreeStatus(
@@ -944,6 +1165,10 @@ REGLAS OBLIGATORIAS:
       );
 
     const summary = [
+      fallbackEventNotice(
+        providerAttempt.fallbackEvent
+      ),
+      providerAttempt.fallbackEvent ? "" : null,
       result.output,
       "",
       "ESTADO DEL WORKTREE:",
@@ -951,7 +1176,7 @@ REGLAS OBLIGATORIAS:
       "",
       `Rama: ${task.branch_name}`,
       `Worktree: ${worktree.worktreePath}`,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
 
     const updatedTask = await pool.query(
       `
@@ -969,11 +1194,6 @@ REGLAS OBLIGATORIAS:
       ]
     );
 
-    await finishTaskExecution({
-      executionId,
-      status: "passed",
-      ...executionMetadata(result),
-    });
     executionId = null;
 
     await pool.query(
@@ -1625,21 +1845,6 @@ router.post(
         [agent.id]
       );
 
-      const execution =
-        await startTaskExecution({
-          taskId: task.id,
-          agentId: agent.id,
-          executionType: "correction",
-          provider: taskProvider,
-          model:
-            getModelForHistory({
-              provider: taskProvider,
-              model: task.model,
-            }),
-        });
-
-      executionId = execution.id;
-
       let correctionAllowedPathsPrompt =
         buildAllowedPathsPrompt({
           assignedRole:
@@ -1701,15 +1906,30 @@ ${correctionAllowedPathsPrompt}
 - Informá qué corregiste y qué validaciones ejecutaste.
 `;
 
-      const correctionResult =
-        await executeAgent({
-          provider: taskProvider,
-          workingDirectory:
-            task.agent_working_path,
-          prompt,
+      const providerAttempt =
+        await runProviderBackedAttempt({
+          taskId: task.id,
+          agentId: agent.id,
+          executionType: "correction",
+          originalProvider: taskProvider,
+          capability: "correction",
           sandbox: "workspace-write",
           model: task.model,
+          runWithProvider: (provider) =>
+            executeAgent({
+              provider,
+              workingDirectory:
+                task.agent_working_path,
+              prompt,
+              sandbox: "workspace-write",
+              model:
+                provider === taskProvider
+                  ? task.model
+                  : null,
+            }),
         });
+      const correctionResult =
+        providerAttempt.result;
 
       const gitStatus =
         await getWorktreeStatus(
@@ -1719,13 +1939,17 @@ ${correctionAllowedPathsPrompt}
       const correctionSummary = [
         "",
         "",
+        fallbackEventNotice(
+          providerAttempt.fallbackEvent
+        ),
+        providerAttempt.fallbackEvent ? "" : null,
         `=== CORRECCIÓN ${task.correction_count + 1} ===`,
         correctionResult.output,
         "",
         "ESTADO DEL WORKTREE:",
         gitStatus ||
           "Sin cambios pendientes.",
-      ].join("\n");
+      ].filter(Boolean).join("\n");
 
       const updatedTask =
         await pool.query(
@@ -1756,11 +1980,6 @@ correction_count =
           ]
         );
 
-      await finishTaskExecution({
-        executionId,
-        status: "passed",
-        ...executionMetadata(correctionResult),
-      });
       executionId = null;
 
       await pool.query(

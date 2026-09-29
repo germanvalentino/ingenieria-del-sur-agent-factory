@@ -4,6 +4,67 @@ import path from "node:path";
 
 const MAX_EXECUTION_TIME = 15 * 60 * 1000;
 
+function createProviderFailureError(message, reason) {
+  const error = new Error(message);
+  error.isProviderFailure = true;
+  error.providerFailureReason = reason;
+  return error;
+}
+
+function classifyCodexProviderFailure(message) {
+  const text = String(message || "");
+
+  if (
+    /\b(timeout|timed?\s*out|etimedout|tiempo\s+m[aá]ximo|super[oó]\s+el\s+tiempo)\b/i.test(
+      text
+    )
+  ) {
+    return "timeout";
+  }
+
+  if (
+    /\b(rate\s*limit|rate.?limited|quota|cuota|too\s+many\s+requests|429)\b/i.test(
+      text
+    )
+  ) {
+    return "rate limit o cuota";
+  }
+
+  if (
+    /\b(http\s+(?:status\s+)?5\d\d|status\s+5\d\d|5\d\d\s+(?:internal\s+server\s+error|bad\s+gateway|gateway\s+timeout|service\s+unavailable)|internal\s+server\s+error|bad\s+gateway|gateway\s+timeout)\b/i.test(
+      text
+    )
+  ) {
+    return "error 5xx del proveedor";
+  }
+
+  if (
+    /\b(service\s+unavailable|temporarily\s+unavailable|overloaded|econnreset|enotfound)\b/i.test(
+      text
+    )
+  ) {
+    return "servicio no disponible";
+  }
+
+  if (
+    /\b(authentication|unauthorized|login|oauth|not\s+logged\s+in|api[_-]?key|401)\b/i.test(
+      text
+    )
+  ) {
+    return "error de autenticacion";
+  }
+
+  if (
+    /\b(command\s+not\s+found:\s*codex|codex(?:\.exe)?\s+.*(?:not\s+recognized|no\s+se\s+reconoce|no\s+se\s+encontro)|spawn\s+codex(?:\.exe)?\s+enoent)\b/i.test(
+      text
+    )
+  ) {
+    return "CLI no disponible";
+  }
+
+  return null;
+}
+
 function toNumberOrNull(value) {
   if (Number.isFinite(value)) {
     return value;
@@ -251,13 +312,25 @@ export function executeCodex({
     });
 
     child.on("error", (error) => {
-      reject(error);
+      reject(
+        createProviderFailureError(
+          error.message,
+          error.code === "ENOENT"
+            ? "CLI no disponible"
+            : classifyCodexProviderFailure(
+                error.message
+              ) || "servicio no disponible"
+        )
+      );
     });
 
     const timeout = setTimeout(() => {
       child.kill();
       reject(
-        new Error("Codex superó el tiempo máximo de 15 minutos")
+        createProviderFailureError(
+          "Codex supero el tiempo maximo de 15 minutos",
+          "timeout"
+        )
       );
     }, MAX_EXECUTION_TIME);
 
@@ -267,14 +340,26 @@ export function executeCodex({
         parseCodexJsonOutput(stdout);
 
       if (code !== 0) {
+        const errorMessage =
+          parsedOutput?.streamError ||
+          stderr ||
+          parsedOutput?.output ||
+          stdout ||
+          `Codex finalizo con codigo ${code}`;
+        const providerFailureReason =
+          parsedOutput?.streamError || stderr
+            ? classifyCodexProviderFailure(
+                errorMessage
+              )
+            : null;
+
         reject(
-          new Error(
-            parsedOutput?.streamError ||
-              stderr ||
-              parsedOutput?.output ||
-              stdout ||
-              `Codex finalizó con código ${code}`
-          )
+          providerFailureReason
+            ? createProviderFailureError(
+                errorMessage,
+                providerFailureReason
+              )
+            : new Error(errorMessage)
         );
         return;
       }

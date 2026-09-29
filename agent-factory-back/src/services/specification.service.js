@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { executeAgent } from "./agent-runner.service.js";
+import {
+  buildExecutionRequirements,
+  describeProviderFallbackEvent,
+  executeAgent,
+  getAlternativeProvider,
+  getProviderCapabilitySupport,
+  getProviderFailure,
+} from "./agent-runner.service.js";
 
 const SPEC_WORKSPACE = path.resolve(
   process.env.SPECIFICATION_WORKSPACE ||
@@ -13,7 +20,9 @@ function ensureWorkspace() {
 }
 
 function outputOf(result) {
-  return String(result?.output || result?.result || result?.summary || "").trim();
+  return String(
+    result?.output || result?.result || result?.summary || ""
+  ).trim();
 }
 
 function parseJson(text) {
@@ -21,16 +30,19 @@ function parseJson(text) {
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
-  try { return JSON.parse(cleaned); } catch {}
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {}
+
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
-  if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
-  throw new Error("El proveedor no devolvio JSON valido");
-}
 
-function providerError(error) {
-  const message = String(error?.message || error || "Error desconocido");
-  return /quota|rate.?limit|unauthor|auth|login|token|timeout|tiempo m[aá]ximo|not found|no se reconoce|enoent|cli|network|connection|models cache/i.test(message);
+  if (start >= 0 && end > start) {
+    return JSON.parse(cleaned.slice(start, end + 1));
+  }
+
+  throw new Error("El proveedor no devolvio JSON valido");
 }
 
 async function callProvider(provider, prompt) {
@@ -41,21 +53,157 @@ async function callProvider(provider, prompt) {
       prompt,
       sandbox: "read-only",
     });
-    return { ok: true, provider, result, text: outputOf(result) };
+
+    return {
+      ok: true,
+      provider,
+      result,
+      text: outputOf(result),
+    };
   } catch (error) {
+    const providerFailure = getProviderFailure(error);
+
     return {
       ok: false,
       provider,
-      providerError: providerError(error),
+      providerError: providerFailure.isProviderFailure,
+      providerFailureReason: providerFailure.reason,
       error: String(error?.message || error),
     };
   }
 }
 
+async function callProviderWithFallback({
+  provider,
+  prompt,
+  stage,
+  trace,
+}) {
+  const primary = await callProvider(provider, prompt);
+
+  trace.push(
+    primary.ok
+      ? { provider, stage, status: "completed" }
+      : {
+          provider,
+          stage,
+          status: "error",
+          error: primary.error,
+        }
+  );
+
+  if (primary.ok || !primary.providerError) {
+    return primary;
+  }
+
+  const alternativeProvider =
+    getAlternativeProvider(provider);
+  const fallbackReason =
+    primary.providerFailureReason ||
+    "falla de proveedor";
+
+  const capabilitySupport =
+    getProviderCapabilitySupport({
+      provider: alternativeProvider,
+      executionRequirements:
+        buildExecutionRequirements({
+          capability: "specification",
+          sandbox: "read-only",
+        }),
+    });
+
+  if (!capabilitySupport.supported) {
+    const detail =
+      capabilitySupport.reason ||
+      "El proveedor alternativo no soporta Specification Assistant";
+    trace.push({
+      provider: alternativeProvider,
+      stage: `${stage}-fallback`,
+      status: "skipped",
+      fallbackFrom: provider,
+      fallbackReason,
+      error: detail,
+    });
+
+    primary.error = describeProviderFallbackEvent({
+      originalProvider: provider,
+      reason: fallbackReason,
+      alternativeProvider,
+      status: "omitido",
+      detail,
+    });
+
+    return primary;
+  }
+
+  trace.push({
+    provider: alternativeProvider,
+    stage: `${stage}-fallback`,
+    status: "started",
+    fallbackFrom: provider,
+    fallbackReason,
+  });
+
+  const fallback = await callProvider(
+    alternativeProvider,
+    prompt
+  );
+
+  trace.push(
+    fallback.ok
+      ? {
+          provider: alternativeProvider,
+          stage: `${stage}-fallback`,
+          status: "completed",
+          fallbackFrom: provider,
+          fallbackReason,
+        }
+      : {
+          provider: alternativeProvider,
+          stage: `${stage}-fallback`,
+          status: "error",
+          fallbackFrom: provider,
+          fallbackReason,
+          error: fallback.error,
+        }
+  );
+
+  if (!fallback.ok && fallback.providerError) {
+    fallback.error = describeProviderFallbackEvent({
+      originalProvider: provider,
+      reason: fallbackReason,
+      alternativeProvider,
+      status: "fallido",
+      detail: fallback.error,
+    });
+  }
+
+  return fallback;
+}
+
+function abortIfProviderFallbackFailed(result, trace) {
+  if (result.ok || !result.providerError) {
+    return;
+  }
+
+  const error = new Error(
+    `No fue posible continuar por falla de proveedor: ${result.error}`
+  );
+  error.statusCode = 503;
+  error.trace = trace;
+  throw error;
+}
+
 function contextText({ idea, conversation = [] }) {
   const history = conversation.length
-    ? conversation.map((item, index) => `${index + 1}. ${item.role}: ${item.content}`).join("\n")
+    ? conversation
+        .map(
+          (item, index) =>
+            `${index + 1}. ${item.role}: ${item.content}`
+        )
+        .join("\n")
     : "Sin respuestas previas.";
+
   return `IDEA ORIGINAL:\n${idea}\n\nCONVERSACION DE REFINAMIENTO:\n${history}`;
 }
 
@@ -72,39 +220,61 @@ const JSON_SCHEMA = `Devuelve SOLO JSON valido, sin markdown, con esta estructur
   "notes": ["..."]
 }`;
 
-export async function refineSpecification({ idea, conversation = [] }) {
+export async function refineSpecification({
+  idea,
+  conversation = [],
+}) {
   if (!String(idea || "").trim()) {
     const error = new Error("La idea es obligatoria");
     error.statusCode = 400;
     throw error;
   }
 
-  const context = contextText({ idea: idea.trim(), conversation });
+  const context = contextText({
+    idea: idea.trim(),
+    conversation,
+  });
   const trace = [];
 
-  const claudeAnalysis = await callProvider("claude", `
+  const claudeAnalysis =
+    await callProviderWithFallback({
+      provider: "claude",
+      stage: "functional-analysis",
+      trace,
+      prompt: `
 Sos el Analista Funcional de Ingenieria del Sur Agent Factory.
 Analiza la solicitud. No inventes decisiones de producto. Detecta ambiguedades que puedan cambiar materialmente la implementacion, comportamiento o criterios verificables.
 Si falta informacion importante, propone pocas preguntas concretas. Si alcanza, prepara un borrador estructurado.
-${context}
-${JSON_SCHEMA}`);
-  trace.push(claudeAnalysis.ok
-    ? { provider: "claude", stage: "functional-analysis", status: "completed" }
-    : { provider: "claude", stage: "functional-analysis", status: "error", error: claudeAnalysis.error });
+      ${context}
+${JSON_SCHEMA}`,
+    });
 
-  const firstAnalysis = claudeAnalysis.ok ? claudeAnalysis.text : "Claude no estuvo disponible.";
-  const codexReview = await callProvider("codex", `
+  abortIfProviderFallbackFailed(claudeAnalysis, trace);
+
+  const firstAnalysis = claudeAnalysis.ok
+    ? claudeAnalysis.text
+    : "Claude no estuvo disponible.";
+  const codexReview =
+    await callProviderWithFallback({
+      provider: "codex",
+      stage: "technical-review",
+      trace,
+      prompt: `
 Sos el Revisor Tecnico de Ingenieria del Sur Agent Factory.
 Revisa criticamente la idea y el analisis funcional. Busca casos borde, decisiones tecnicas/funcionales faltantes y criterios que no sean verificables. No decidas por el usuario cuando existan alternativas con distinto comportamiento.
 ${context}
-\nANALISIS FUNCIONAL DE CLAUDE:\n${firstAnalysis}
-${JSON_SCHEMA}`);
-  trace.push(codexReview.ok
-    ? { provider: "codex", stage: "technical-review", status: "completed" }
-    : { provider: "codex", stage: "technical-review", status: "error", error: codexReview.error });
+
+ANALISIS FUNCIONAL DE CLAUDE:
+${firstAnalysis}
+${JSON_SCHEMA}`,
+    });
+
+  abortIfProviderFallbackFailed(codexReview, trace);
 
   if (!claudeAnalysis.ok && !codexReview.ok) {
-    const error = new Error(`No fue posible analizar la especificacion. Claude: ${claudeAnalysis.error}. Codex: ${codexReview.error}`);
+    const error = new Error(
+      `No fue posible analizar la especificacion. Claude: ${claudeAnalysis.error}. Codex: ${codexReview.error}`
+    );
     error.statusCode = 503;
     throw error;
   }
@@ -120,33 +290,37 @@ REGLAS:
 - Los criterios deben ser comprobables y preferentemente Given/When/Then.
 - No inventes alcance adicional.
 ${context}
-\nANALISIS CLAUDE:\n${claudeAnalysis.ok ? claudeAnalysis.text : claudeAnalysis.error}
-\nREVISION CODEX:\n${codexReview.ok ? codexReview.text : codexReview.error}
+
+ANALISIS CLAUDE:
+${claudeAnalysis.ok ? claudeAnalysis.text : claudeAnalysis.error}
+
+REVISION CODEX:
+${codexReview.ok ? codexReview.text : codexReview.error}
 ${JSON_SCHEMA}`;
 
-  let synthesis = await callProvider("claude", synthesisPrompt);
-  trace.push(synthesis.ok
-    ? { provider: "claude", stage: "synthesis", status: "completed" }
-    : { provider: "claude", stage: "synthesis", status: "error", error: synthesis.error });
+  const synthesis = await callProviderWithFallback({
+    provider: "claude",
+    stage: "synthesis",
+    trace,
+    prompt: synthesisPrompt,
+  });
 
   if (!synthesis.ok) {
-    const fallback = await callProvider("codex", synthesisPrompt);
-    trace.push(fallback.ok
-      ? { provider: "codex", stage: "synthesis-fallback", status: "completed" }
-      : { provider: "codex", stage: "synthesis-fallback", status: "error", error: fallback.error });
-    synthesis = fallback;
-  }
-
-  if (!synthesis.ok) {
-    const error = new Error(`No fue posible consolidar la especificacion: ${synthesis.error}`);
+    const error = new Error(
+      `No fue posible consolidar la especificacion: ${synthesis.error}`
+    );
     error.statusCode = 503;
     throw error;
   }
 
   const specification = parseJson(synthesis.text);
+
   return {
     ...specification,
-    status: specification.status === "READY" ? "READY" : "NEEDS_CLARIFICATION",
+    status:
+      specification.status === "READY"
+        ? "READY"
+        : "NEEDS_CLARIFICATION",
     trace,
     generatedBy: synthesis.provider,
   };

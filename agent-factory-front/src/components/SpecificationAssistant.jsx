@@ -12,6 +12,16 @@ function buildTaskDescription(spec) {
   return sections.filter(Boolean).join("\n\n");
 }
 
+function formatTraceStep(step) {
+  const base = `${step.provider} - ${step.stage}: ${step.status}`;
+
+  if (!step.fallbackFrom && !step.fallbackReason) {
+    return base;
+  }
+
+  return `${base} - fallback desde ${step.fallbackFrom || "proveedor original"} por ${step.fallbackReason || "falla de proveedor"}`;
+}
+
 export default function SpecificationAssistant({ onUseSpecification }) {
   const [idea, setIdea] = useState("");
   const [conversation, setConversation] = useState([]);
@@ -104,7 +114,7 @@ export default function SpecificationAssistant({ onUseSpecification }) {
             </div>
           )}
 
-          {result?.trace?.length > 0 && <div className="mt-6 border-t border-white/10 pt-4 text-xs text-slate-500">{result.trace.map((step, i) => <span key={`${step.provider}-${step.stage}-${i}`} className="mr-3 inline-block">{step.provider} · {step.stage}: {step.status}</span>)}</div>}
+          {result?.trace?.length > 0 && <div className="mt-6 border-t border-white/10 pt-4 text-xs text-slate-500">{result.trace.map((step, i) => <span key={`${step.provider}-${step.stage}-${i}`} className="mr-3 inline-block">{formatTraceStep(step)}</span>)}</div>}
         </div>
       </div>
     </section>

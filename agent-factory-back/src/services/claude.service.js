@@ -436,8 +436,12 @@ export async function validateClaudeInstallation(
   return claudeValidationPromise;
 }
 
-function createClaudeSandboxSettings(workingDirectory) {
+function createClaudeSandboxSettings(
+  workingDirectory,
+  sandbox = "workspace-write"
+) {
   const nativeWindows = process.platform === "win32";
+  const readOnly = sandbox === "read-only";
 
   // Riesgo pendiente: Windows nativo no ofrece sandbox estricto equivalente a WSL2.
   const settingsDirectory = fs.mkdtempSync(
@@ -459,7 +463,9 @@ function createClaudeSandboxSettings(workingDirectory) {
           filesystem: {
             strictAllowlist: true,
             allowRead: [workingDirectory],
-            allowWrite: [workingDirectory],
+            allowWrite: readOnly
+              ? []
+              : [workingDirectory],
             denyRead: [
               path.join(workingDirectory, ".env"),
               path.join(workingDirectory, ".env.*"),
@@ -623,9 +629,72 @@ function detectAuthError(stderr, stdout) {
   );
 }
 
-function createExecutionError(message, agentResult = null) {
+function classifyClaudeProviderFailure(message) {
+  const text = String(message || "");
+
+  if (
+    /\b(timeout|timed?\s*out|etimedout|tiempo\s+maximo|supero\s+el\s+tiempo|no\s+respondio)\b/i.test(
+      text
+    )
+  ) {
+    return "timeout";
+  }
+
+  if (
+    /\b(rate\s*limit|rate.?limited|quota|cuota|too\s+many\s+requests|429)\b/i.test(
+      text
+    )
+  ) {
+    return "rate limit o cuota";
+  }
+
+  if (
+    /\b(http\s+(?:status\s+)?5\d\d|status\s+5\d\d|5\d\d\s+(?:internal\s+server\s+error|bad\s+gateway|gateway\s+timeout|service\s+unavailable)|internal\s+server\s+error|bad\s+gateway|gateway\s+timeout)\b/i.test(
+      text
+    )
+  ) {
+    return "error 5xx del proveedor";
+  }
+
+  if (
+    /\b(service\s+unavailable|temporarily\s+unavailable|overloaded|econnreset|enotfound)\b/i.test(
+      text
+    )
+  ) {
+    return "servicio no disponible";
+  }
+
+  if (
+    /\b(authentication|unauthorized|login|oauth|not\s+logged\s+in|api[_-]?key|401)\b/i.test(
+      text
+    )
+  ) {
+    return "error de autenticacion";
+  }
+
+  if (
+    /\b(no\s+se\s+pudo\s+ejecutar\s+claude|command\s+not\s+found:\s*claude|claude(?:\.exe)?\s+.*(?:not\s+recognized|no\s+se\s+reconoce|no\s+se\s+encontro)|spawn\s+claude(?:\.exe)?\s+enoent)\b/i.test(
+      text
+    )
+  ) {
+    return "CLI no disponible";
+  }
+
+  return null;
+}
+
+function createExecutionError(
+  message,
+  agentResult = null,
+  providerFailureReason = null
+) {
   const error = new Error(message);
   error.agentResult = agentResult;
+  if (providerFailureReason) {
+    error.isProviderFailure = true;
+    error.providerFailureReason =
+      providerFailureReason;
+  }
   return error;
 }
 
@@ -636,18 +705,34 @@ export function getClaudeDefaultModel() {
 export async function executeClaude({
   workingDirectory,
   prompt,
+  sandbox = "workspace-write",
   model = DEFAULT_CLAUDE_MODEL,
 }) {
   const resolvedDirectory =
     validateWorkingDirectory(workingDirectory);
-  const supportedOptions =
-    await validateClaudeInstallation(resolvedDirectory);
+  let supportedOptions;
+
+  try {
+    supportedOptions =
+      await validateClaudeInstallation(resolvedDirectory);
+  } catch (error) {
+    throw createExecutionError(
+      error.message,
+      null,
+      classifyClaudeProviderFailure(
+        error.message
+      ) || "CLI no disponible"
+    );
+  }
   const commandConfig = resolveClaudeCommand();
 
   let sandboxSettings;
 
   sandboxSettings =
-    createClaudeSandboxSettings(resolvedDirectory);
+    createClaudeSandboxSettings(
+      resolvedDirectory,
+      sandbox
+    );
 
   const claudeArgs = [
     "-p",
@@ -671,9 +756,19 @@ export async function executeClaude({
     claudeArgs.push("--permission-mode", "default");
   }
 
+  const allowedTools =
+    sandbox === "read-only"
+      ? CLAUDE_ALLOWED_TOOLS.filter(
+          (tool) =>
+            !["Write", "Edit", "MultiEdit"].includes(
+              tool
+            )
+        )
+      : CLAUDE_ALLOWED_TOOLS;
+
   claudeArgs.push(
     supportedOptions.allowedToolsFlag,
-    CLAUDE_ALLOWED_TOOLS.join(","),
+    allowedTools.join(","),
     supportedOptions.disallowedToolsFlag,
     CLAUDE_DISALLOWED_TOOLS.join(",")
   );
@@ -695,7 +790,15 @@ export async function executeClaude({
       removeClaudeSandboxSettings(
         sandboxSettings.settingsDirectory
       );
-      reject(error);
+      reject(
+        createExecutionError(
+          error.message,
+          null,
+          classifyClaudeProviderFailure(
+            error.message
+          ) || "CLI no disponible"
+        )
+      );
       return;
     }
 
@@ -725,7 +828,17 @@ export async function executeClaude({
     });
 
     child.on("error", (error) => {
-      fail(error);
+      fail(
+        createExecutionError(
+          error.message,
+          null,
+          error.code === "ENOENT"
+            ? "CLI no disponible"
+            : classifyClaudeProviderFailure(
+                error.message
+              ) || "servicio no disponible"
+        )
+      );
     });
 
     const timeout = setTimeout(() => {
@@ -745,18 +858,26 @@ export async function executeClaude({
       const safeStderr = redactSensitiveText(stderr);
 
       if (!parsedOutput) {
+        const errorMessage = [
+          timedOut
+            ? "Claude supero el tiempo maximo de 15 minutos"
+            : null,
+          "Claude devolvio JSON invalido",
+          safeStderr,
+          redactSensitiveText(stdout).slice(-4000),
+        ]
+          .filter(Boolean)
+          .join("\n");
+
         fail(
-          new Error(
-            [
-              timedOut
-                ? "Claude supero el tiempo maximo de 15 minutos"
-                : null,
-              "Claude devolvio JSON invalido",
-              safeStderr,
-              redactSensitiveText(stdout).slice(-4000),
-            ]
-              .filter(Boolean)
-              .join("\n")
+          createExecutionError(
+            errorMessage,
+            null,
+            timedOut
+              ? "timeout"
+              : classifyClaudeProviderFailure(
+                  `${safeStderr}\n${stdout}`
+                )
           )
         );
         return;
@@ -785,29 +906,39 @@ export async function executeClaude({
         )
           ? "Claude no esta autenticado o la sesion OAuth local no esta disponible para este proceso."
           : null;
+        const errorMessage = [
+          authMessage,
+          redactSensitiveText(result.output),
+          safeStderr,
+          timedOut
+            ? "Claude supero el tiempo maximo de 15 minutos"
+            : null,
+          signal
+            ? `Claude fue cancelado por senal ${signal}`
+            : null,
+          code !== 0
+            ? `Claude finalizo con codigo ${code}`
+            : null,
+          failedByPayload
+            ? `Claude finalizo con terminal_reason=${parsedOutput.terminal_reason}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const providerFailureReason =
+          timedOut
+            ? "timeout"
+            : authMessage
+              ? "error de autenticacion"
+              : classifyClaudeProviderFailure(
+                  `${safeStderr}\n${result.output}`
+                );
 
         fail(
           createExecutionError(
-            [
-              authMessage,
-              redactSensitiveText(result.output),
-              safeStderr,
-              timedOut
-                ? "Claude supero el tiempo maximo de 15 minutos"
-                : null,
-              signal
-                ? `Claude fue cancelado por senal ${signal}`
-                : null,
-              code !== 0
-                ? `Claude finalizo con codigo ${code}`
-                : null,
-              failedByPayload
-                ? `Claude finalizo con terminal_reason=${parsedOutput.terminal_reason}`
-                : null,
-            ]
-              .filter(Boolean)
-              .join("\n"),
-            result
+            errorMessage,
+            result,
+            providerFailureReason
           )
         );
         return;

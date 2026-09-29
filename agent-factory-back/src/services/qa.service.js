@@ -5,7 +5,7 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { executeCodex } from "./codex.service.js";
+import { executeAgent } from "./agent-runner.service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1049,6 +1049,7 @@ export async function runQaValidation({
   workingDirectory,
   projectDirectories = null,
   baseBranch = "main",
+  provider = "codex",
   taskTitle,
   taskDescription,
   correctionFeedback,
@@ -1264,22 +1265,23 @@ HALLAZGOS:
 RIESGOS:
 `;
 
-  const codexReview =
-    await executeCodex({
+  const agentReview =
+    await executeAgent({
+      provider,
       workingDirectory: safeDirectory,
       prompt: reviewPrompt,
       sandbox: "read-only",
     });
 
   const verdict = parseQaVerdict(
-    codexReview.output
+    agentReview.output
   );
 
   const summary = [
     commandsSummary,
     "",
-    "=== REVISIÓN DE CÓDIGO CODEX ===",
-    codexReview.output,
+    `=== REVISION DE CODIGO ${provider.toUpperCase()} ===`,
+    agentReview.output,
   ].join("\n");
 
   await assertGitStatusUnchanged({
@@ -1291,8 +1293,13 @@ RIESGOS:
     status: verdict.status,
     summary,
     results,
-    review: codexReview.output,
-    codexUsage: codexReview.usage,
-    codexModel: codexReview.model,
+    review: agentReview.output,
+    aiProvider: provider,
+    aiUsage: agentReview.usage,
+    aiModel: agentReview.model,
+    codexUsage:
+      provider === "codex" ? agentReview.usage : null,
+    codexModel:
+      provider === "codex" ? agentReview.model : null,
   };
 }
