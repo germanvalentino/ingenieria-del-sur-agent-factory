@@ -8,6 +8,7 @@ import {
   getProviderCapabilitySupport,
   getProviderFailure,
 } from "./agent-runner.service.js";
+import { MAX_EXTRACTED_CHARS } from "./pdf-attachment.service.js";
 
 const SPEC_WORKSPACE = path.resolve(
   process.env.SPECIFICATION_WORKSPACE ||
@@ -194,7 +195,18 @@ function abortIfProviderFallbackFailed(result, trace) {
   throw error;
 }
 
-function contextText({ idea, conversation = [] }) {
+function normalizeAttachments(attachments = []) {
+  return attachments
+    .map((attachment) => ({
+      fileName: String(attachment?.fileName || "").trim(),
+      text: String(attachment?.text || "")
+        .trim()
+        .slice(0, MAX_EXTRACTED_CHARS),
+    }))
+    .filter((attachment) => attachment.fileName && attachment.text);
+}
+
+function contextText({ idea, conversation = [], attachments = [] }) {
   const history = conversation.length
     ? conversation
         .map(
@@ -204,7 +216,16 @@ function contextText({ idea, conversation = [] }) {
         .join("\n")
     : "Sin respuestas previas.";
 
-  return `IDEA ORIGINAL:\n${idea}\n\nCONVERSACION DE REFINAMIENTO:\n${history}`;
+  const documentsSection = attachments.length
+    ? `\n\nCONTEXTO DOCUMENTAL ADJUNTO (PDFs aportados por el usuario, usar como contexto adicional sin reemplazar su pedido):\n${attachments
+        .map(
+          (doc, index) =>
+            `--- Documento ${index + 1}: ${doc.fileName} ---\n${doc.text}`
+        )
+        .join("\n\n")}`
+    : "";
+
+  return `IDEA ORIGINAL:\n${idea}\n\nCONVERSACION DE REFINAMIENTO:\n${history}${documentsSection}`;
 }
 
 const JSON_SCHEMA = `Devuelve SOLO JSON valido, sin markdown, con esta estructura exacta:
@@ -223,6 +244,7 @@ const JSON_SCHEMA = `Devuelve SOLO JSON valido, sin markdown, con esta estructur
 export async function refineSpecification({
   idea,
   conversation = [],
+  attachments = [],
 }) {
   if (!String(idea || "").trim()) {
     const error = new Error("La idea es obligatoria");
@@ -230,9 +252,11 @@ export async function refineSpecification({
     throw error;
   }
 
+  const normalizedAttachments = normalizeAttachments(attachments);
   const context = contextText({
     idea: idea.trim(),
     conversation,
+    attachments: normalizedAttachments,
   });
   const trace = [];
 
@@ -323,5 +347,8 @@ ${JSON_SCHEMA}`;
         : "NEEDS_CLARIFICATION",
     trace,
     generatedBy: synthesis.provider,
+    sourceDocuments: normalizedAttachments.map(
+      (doc) => doc.fileName
+    ),
   };
 }
