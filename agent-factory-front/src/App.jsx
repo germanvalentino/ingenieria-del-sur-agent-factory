@@ -20,8 +20,10 @@ import {
   ShieldCheck,
   MessageSquareWarning,
   Wrench,
+  WandSparkles,
 } from "lucide-react";
 import ProjectManager from "./components/ProjectManager";
+import SpecificationAssistant from "./components/SpecificationAssistant";
 
 const API_URL =
   import.meta.env.VITE_API_URL ||
@@ -77,6 +79,11 @@ const tabs = [
     id: "operations",
     label: "Operaciones",
     icon: LayoutDashboard,
+  },
+  {
+    id: "specifications",
+    label: "Especificacion IA",
+    icon: WandSparkles,
   },
   {
     id: "projects",
@@ -2150,6 +2157,13 @@ async function correctTask(taskId) {
           </>
         )}
           </>
+        ) : activeTab === "specifications" ? (
+          <SpecificationAssistant
+            onUseSpecification={({ title, description }) => {
+              setForm((current) => ({ ...current, title, description }));
+              setActiveTab("operations");
+            }}
+          />
         ) : (
           <section>
             <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
