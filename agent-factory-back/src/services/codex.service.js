@@ -222,6 +222,7 @@ export function executeCodex({
   prompt,
   sandbox = "workspace-write",
   model = null,
+  skipGitRepoCheck = false,
 })  {
   return new Promise((resolve, reject) => {
     if (!path.isAbsolute(workingDirectory)) {
@@ -278,6 +279,10 @@ export function executeCodex({
       "--cd",
       resolvedDirectory,
     ];
+
+    if (skipGitRepoCheck) {
+      args.push("--skip-git-repo-check");
+    }
 
     if (configuredModel) {
       args.push("--model", configuredModel);

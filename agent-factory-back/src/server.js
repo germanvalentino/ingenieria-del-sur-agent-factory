@@ -7,6 +7,9 @@ import tasksRoutes from "./routes/tasks.routes.js";
 import { recoverInterruptedTasks } from "./services/recovery.service.js";
 import projectsRoutes from "./routes/projects.routes.js";
 import specificationsRoutes from "./routes/specifications.routes.js";
+import whatsappRoutes from "./routes/whatsapp.routes.js";
+import https from "node:https";
+import fs from "node:fs";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -18,6 +21,7 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/tasks", tasksRoutes);
 app.use("/api/projects", projectsRoutes);
 app.use("/api/specifications", specificationsRoutes);
+app.use("/api/whatsapp", whatsappRoutes);
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -77,6 +81,28 @@ async function startServer() {
         `Agent Factory API ejecutándose en http://localhost:${PORT}`
       );
     });
+
+    // HTTPS adicional y opcional para Meta/WhatsApp.
+    // No cambia el puerto HTTP existente usado por el frontend.
+    const httpsPort = Number(process.env.WHATSAPP_HTTPS_PORT || 0);
+    const sslCert = process.env.WHATSAPP_SSL_CERT;
+    const sslKey = process.env.WHATSAPP_SSL_KEY;
+
+    if (httpsPort && sslCert && sslKey) {
+      https
+        .createServer(
+          {
+            cert: fs.readFileSync(sslCert),
+            key: fs.readFileSync(sslKey),
+          },
+          app
+        )
+        .listen(httpsPort, () => {
+          console.log(
+            `WhatsApp HTTPS disponible en puerto ${httpsPort}`
+          );
+        });
+    }
   } catch (error) {
     console.error(
       "No se pudo iniciar Agent Factory:",

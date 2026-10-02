@@ -1,10 +1,12 @@
 import { executeClaude, getClaudeDefaultModel } from "./claude.service.js";
 import { executeCodex } from "./codex.service.js";
+import { executeOllama, getOllamaDefaultModel } from "./ollama.service.js";
 import { classifyProviderFailure } from "./provider-failure.service.js";
 
 export const VALID_DEVELOPMENT_PROVIDERS = [
   "codex",
   "claude",
+  "ollama",
 ];
 
 const PROVIDER_FAILURE_PATTERNS = [
@@ -41,6 +43,13 @@ const PROVIDER_FAILURE_PATTERNS = [
 ];
 
 const PROVIDER_CAPABILITIES = {
+  ollama: {
+    // Primera etapa: Ollama se habilita para razonamiento textual/especificacion.
+    // No se anuncia como agente de desarrollo hasta agregar herramientas de archivos/shell.
+    capabilities: new Set(["specification"]),
+    tools: new Set(["read", "sandbox:read-only"]),
+    permissions: new Set(["filesystem:read", "shell:limited"]),
+  },
   codex: {
     capabilities: new Set([
       "development",
@@ -262,7 +271,9 @@ export function assertValidProvider(provider) {
 
 export function getAlternativeProvider(provider) {
   const normalized = assertValidProvider(provider);
-  return normalized === "claude" ? "codex" : "claude";
+  if (normalized === "claude") return "codex";
+  if (normalized === "codex") return "claude";
+  return "claude";
 }
 
 export function getProviderFailure(error) {
@@ -398,6 +409,10 @@ export function getConfiguredModel(provider) {
     return getClaudeDefaultModel();
   }
 
+  if (normalized === "ollama") {
+    return getOllamaDefaultModel();
+  }
+
   return process.env.CODEX_MODEL || null;
 }
 
@@ -411,7 +426,7 @@ export function getDisplayModel(provider) {
       : getConfiguredModel("claude");
   }
 
-  return getConfiguredModel("codex");
+  return getConfiguredModel(normalized);
 }
 
 export function getModelForHistory({
@@ -456,6 +471,7 @@ export function executeAgent({
   prompt,
   sandbox = "workspace-write",
   model = null,
+  skipGitRepoCheck = false,
 }) {
   const normalized = assertValidProvider(provider);
 
@@ -471,6 +487,16 @@ export function executeAgent({
     });
   }
 
+  if (normalized === "ollama") {
+    return executeOllama({
+      prompt,
+      model: getExecutionModel({
+        provider: normalized,
+        model,
+      }),
+    });
+  }
+
   return executeCodex({
     workingDirectory,
     prompt,
@@ -479,5 +505,6 @@ export function executeAgent({
       provider: normalized,
       model,
     }),
+    skipGitRepoCheck,
   });
 }
