@@ -19,6 +19,7 @@ import {
   finalizeTaskWorktree,
   getWorktreeStatus,
   prepareTaskWorktree,
+  pushApprovedCommit,
 } from "../services/git-worktree.service.js";
 import {
   finishTaskExecution,
@@ -2157,6 +2158,102 @@ router.post(
         error
       );
 
+      res.status(500).json({
+        status: "error",
+        message: error.message,
+      });
+    }
+  }
+);
+
+
+router.post(
+  "/:id/push",
+  async (req, res) => {
+    try {
+      const taskResult = await pool.query(
+        `
+          SELECT t.*, p.frontend_path, p.backend_path
+          FROM tasks t
+          INNER JOIN projects p ON p.id = t.project_id
+          WHERE t.id = $1
+        `,
+        [req.params.id]
+      );
+
+      const task = taskResult.rows[0];
+
+      if (!task) {
+        return res.status(404).json({
+          status: "error",
+          message: "Tarea no encontrada",
+        });
+      }
+
+      if (task.status !== "passed" || !task.approved_at) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "Solo se puede hacer PUSH después de la aprobación humana y el merge a main",
+        });
+      }
+
+      if (!task.commit_hash) {
+        return res.status(409).json({
+          status: "error",
+          message: "La tarea aprobada no tiene commit_hash para publicar",
+        });
+      }
+
+      const targetDirectory =
+        task.assigned_role === "frontend"
+          ? task.frontend_path
+          : task.backend_path || task.frontend_path;
+
+      if (!targetDirectory) {
+        return res.status(409).json({
+          status: "error",
+          message:
+            "El proyecto no tiene una ruta configurada para localizar el repositorio",
+        });
+      }
+
+      const result = await pushApprovedCommit({
+        targetDirectory,
+        baseBranch: task.base_branch || "main",
+        commitHash: task.commit_hash,
+        remote: "origin",
+      });
+
+      const updatedTask = await pool.query(
+        `
+          UPDATE tasks
+          SET result_summary =
+                COALESCE(result_summary, '')
+                || $2::varchar,
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING *
+        `,
+        [
+          task.id,
+          `\n\nPUSH CONFIRMADO:\nCommit ${result.commitHash} publicado en ${result.remote}/${result.branch}. Duración ${result.durationMs} ms.`,
+        ]
+      );
+
+      res.json({
+        status: "success",
+        message: "PUSH realizado correctamente",
+        push: {
+          remote: result.remote,
+          branch: result.branch,
+          commitHash: result.commitHash,
+          durationMs: result.durationMs,
+        },
+        task: updatedTask.rows[0],
+      });
+    } catch (error) {
+      console.error("Error haciendo PUSH:", error);
       res.status(500).json({
         status: "error",
         message: error.message,

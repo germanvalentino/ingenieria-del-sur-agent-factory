@@ -658,6 +658,7 @@ function App() {
   const [runningTaskId, setRunningTaskId] =
     useState(null);
   const [qaTaskId, setQaTaskId] = useState(null);
+  const [pushingTaskId, setPushingTaskId] = useState(null);
   const [
   correctionTaskId,
   setCorrectionTaskId,
@@ -1092,43 +1093,93 @@ async function correctTask(taskId) {
     setCorrectionTaskId(null);
   }
 }
-  async function approveTask(taskId) {
-  try {
-    rememberQueuePosition(taskId);
-    setError("");
+  async function pushApprovedTask(task) {
+    if (!task?.id || !task?.commit_hash) return;
 
-    const response = await fetch(
-      `${API_URL}/tasks/${taskId}/approve`,
-      {
-        method: "POST",
-      }
+    const confirmed = window.confirm(
+      `¿Seguro que desea hacer el PUSH?\n\n` +
+        `Remote: origin\n` +
+        `Branch: ${task.base_branch || "main"}\n` +
+        `Commit: ${task.commit_hash}`
     );
 
-    const data = await response.json();
+    if (!confirmed) return;
 
-    if (!response.ok) {
-      throw new Error(
-        data.message || "No se pudo aprobar la tarea"
+    try {
+      setPushingTaskId(task.id);
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/tasks/${task.id}/push`,
+        { method: "POST" }
       );
-    }
+      const data = await response.json();
 
-    setDashboard((current) => ({
-      ...current,
-      tasks: current.tasks.map((task) =>
-        task.id === taskId
-          ? {
-              ...task,
-              ...data,
-              status: "passed",
-            }
-          : task
-      ),
-    }));
-    await loadDashboard();
-  } catch (err) {
-    setError(getErrorMessage(err));
+      if (!response.ok) {
+        throw new Error(data.message || "No se pudo realizar el PUSH");
+      }
+
+      if (data.task) {
+        setDashboard((current) => ({
+          ...current,
+          tasks: current.tasks.map((currentTask) =>
+            currentTask.id === task.id
+              ? { ...currentTask, ...data.task }
+              : currentTask
+          ),
+        }));
+      }
+
+      window.alert(
+        `PUSH realizado correctamente.\n\n` +
+          `Remote: ${data.push?.remote || "origin"}\n` +
+          `Branch: ${data.push?.branch || task.base_branch || "main"}\n` +
+          `Commit: ${data.push?.commitHash || task.commit_hash}`
+      );
+
+      await loadDashboard();
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setPushingTaskId(null);
+    }
   }
-}
+
+  async function approveTask(taskId) {
+    try {
+      rememberQueuePosition(taskId);
+      setError("");
+
+      const response = await fetch(
+        `${API_URL}/tasks/${taskId}/approve`,
+        { method: "POST" }
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "No se pudo aprobar la tarea");
+      }
+
+      setDashboard((current) => ({
+        ...current,
+        tasks: current.tasks.map((task) =>
+          task.id === taskId
+            ? { ...task, ...data, status: "passed" }
+            : task
+        ),
+      }));
+
+      await pushApprovedTask({
+        ...data,
+        id: taskId,
+        status: "passed",
+      });
+
+      await loadDashboard();
+    } catch (err) {
+      setError(getErrorMessage(err));
+    }
+  }
 
   return (
     <div className="min-h-screen min-w-0 bg-slate-950 text-slate-200">

@@ -771,3 +771,63 @@ export async function finalizeTaskWorktree({
     warnings,
   };
 }
+
+
+export async function pushApprovedCommit({
+  targetDirectory,
+  baseBranch = "main",
+  commitHash,
+  remote = "origin",
+}) {
+  const safeTargetDirectory = validateAllowedPath(targetDirectory);
+  validateBranchName(baseBranch);
+
+  if (!/^[a-zA-Z0-9._-]+$/.test(remote)) {
+    throw new Error(`Nombre de remote inválido: ${remote}`);
+  }
+  if (!/^[0-9a-fA-F]{7,40}$/.test(String(commitHash || ""))) {
+    throw new Error("Commit aprobado inválido");
+  }
+
+  const repositoryResult = await runGit(
+    ["rev-parse", "--show-toplevel"],
+    safeTargetDirectory
+  );
+  const repositoryRoot = validateAllowedPath(repositoryResult.stdout);
+
+  const statusResult = await runGit(["status", "--porcelain"], repositoryRoot);
+  if (statusResult.stdout) {
+    throw new Error(
+      "El repositorio principal tiene cambios sin guardar. No se puede hacer PUSH."
+    );
+  }
+
+  const branchResult = await runGit(["branch", "--show-current"], repositoryRoot);
+  if (branchResult.stdout !== baseBranch) {
+    throw new Error(
+      `El repositorio principal debe estar en ${baseBranch}, pero está en ${branchResult.stdout}`
+    );
+  }
+
+  const headResult = await runGit(["rev-parse", "HEAD"], repositoryRoot);
+  if (headResult.stdout.toLowerCase() !== String(commitHash).toLowerCase()) {
+    throw new Error(
+      `HEAD (${headResult.stdout}) no coincide con el commit aprobado (${commitHash}).`
+    );
+  }
+
+  await runGit(["remote", "get-url", remote], repositoryRoot);
+
+  const startedAt = Date.now();
+  const pushResult = await runGit(["push", remote, baseBranch], repositoryRoot);
+
+  return {
+    repositoryRoot,
+    remote,
+    branch: baseBranch,
+    commitHash: headResult.stdout,
+    durationMs: Date.now() - startedAt,
+    stdout: pushResult.stdout,
+    stderr: pushResult.stderr,
+  };
+}
