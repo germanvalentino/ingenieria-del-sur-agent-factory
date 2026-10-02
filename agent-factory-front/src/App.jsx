@@ -1222,7 +1222,7 @@ async function correctTask(taskId) {
                   loading ? "animate-spin" : ""
                 }
               />
-              Actualizar
+              Actualizar datos
             </button>
 
             <span className="min-w-0 rounded-full bg-emerald-500/15 px-3 py-1 text-xs text-emerald-300">
