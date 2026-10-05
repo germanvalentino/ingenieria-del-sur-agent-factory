@@ -1225,8 +1225,8 @@ async function correctTask(taskId) {
               Actualizar datos
             </button>
 
-            <span className="min-w-0 rounded-full bg-emerald-500/15 px-3 py-1 text-xs text-emerald-300">
-              Sistema Operativo Version 1.0
+            <span className="min-w-0 rounded-full bg-sky-500/15 px-3 py-1 text-xs text-sky-300">
+              Sistema Operativo version 1.1
             </span>
           </div>
         </div>
