@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react";
 import {
+  CheckCircle2,
+  Circle,
   FolderGit2,
+  LoaderCircle,
   Pencil,
+  Play,
   Plus,
   Power,
+  RefreshCw,
+  Rocket,
   Save,
+  Square,
   X,
+  XCircle,
 } from "lucide-react";
 
 const PROJECTS_API = "http://localhost:3001/api/projects";
@@ -20,6 +28,36 @@ const EMPTY_FORM = {
   defaultBranch: "main",
 };
 
+const STAGE_NAMES = [
+  "Generando estructura",
+  "Inicializando Git",
+  "Creando base PostgreSQL",
+  "Instalando backend",
+  "Instalando frontend",
+  "Aplicando migraciones",
+  "Iniciando backend",
+  "Iniciando frontend",
+  "Comprobando servicios",
+];
+
+function StageIcon({ status }) {
+  if (status === "completed") {
+    return <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />;
+  }
+
+  if (status === "failed") {
+    return <XCircle className="h-4 w-4 shrink-0 text-red-400" />;
+  }
+
+  if (status === "running") {
+    return (
+      <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-sky-400" />
+    );
+  }
+
+  return <Circle className="h-4 w-4 shrink-0 text-slate-600" />;
+}
+
 function ProjectManager({ onProjectsChanged }) {
   const [projects, setProjects] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -28,6 +66,9 @@ function ProjectManager({ onProjectsChanged }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [launchJob, setLaunchJob] = useState(null);
+  const [processStatuses, setProcessStatuses] = useState({});
+  const [processActionId, setProcessActionId] = useState(null);
 
   async function loadProjects() {
     try {
@@ -59,6 +100,82 @@ function ProjectManager({ onProjectsChanged }) {
 
     return () => clearTimeout(timeoutId);
   }, []);
+
+  async function loadProcessStatus(projectId) {
+    try {
+      const response = await fetch(`${PROJECTS_API}/${projectId}/processes`, {
+        cache: "no-store",
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setProcessStatuses((current) => ({
+          ...current,
+          [projectId]: data,
+        }));
+      }
+    } catch {
+      // El estado de procesos es informativo: un fallo de red no es crítico.
+    }
+  }
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      return undefined;
+    }
+
+    projects.forEach((project) => loadProcessStatus(project.id));
+
+    const intervalId = setInterval(() => {
+      projects.forEach((project) => loadProcessStatus(project.id));
+    }, 4000);
+
+    return () => clearInterval(intervalId);
+  }, [projects]);
+
+  useEffect(() => {
+    if (!launchJob?.jobId || launchJob.status !== "running") {
+      return undefined;
+    }
+
+    const intervalId = setInterval(async () => {
+      try {
+        const response = await fetch(
+          `${PROJECTS_API}/jobs/${launchJob.jobId}`,
+          { cache: "no-store" },
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.message || "No se pudo consultar el estado de creación",
+          );
+        }
+
+        setLaunchJob(data);
+
+        if (data.status !== "running") {
+          setSaving(false);
+
+          if (data.status === "completed") {
+            setForm(EMPTY_FORM);
+            setMode("register");
+          }
+
+          await loadProjects();
+          await onProjectsChanged?.();
+        }
+      } catch (pollError) {
+        setError(pollError.message);
+        setSaving(false);
+      }
+    }, 1200);
+
+    return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchJob?.jobId, launchJob?.status]);
 
   function handleChange(event) {
     const { name, value } = event.target;
@@ -95,6 +212,95 @@ function ProjectManager({ onProjectsChanged }) {
     setMode(nextMode);
     setForm(EMPTY_FORM);
     setError("");
+    setLaunchJob(null);
+  }
+
+  async function createProject(autoStart) {
+    if (!form.name.trim() || !form.projectPath.trim()) {
+      setError("Completá el nombre y la carpeta del proyecto");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+      setLaunchJob(
+        autoStart
+          ? {
+              jobId: null,
+              status: "running",
+              stages: STAGE_NAMES.map((name) => ({
+                name,
+                status: "pending",
+                message: null,
+              })),
+              result: null,
+              error: null,
+            }
+          : null,
+      );
+
+      const response = await fetch(`${PROJECTS_API}/scaffold`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: form.name,
+          description: form.description,
+          projectPath: form.projectPath,
+          repositoryUrl: form.repositoryUrl,
+          defaultBranch: form.defaultBranch,
+          autoStart,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "No se pudo crear el proyecto");
+      }
+
+      if (data.mode === "job") {
+        setLaunchJob((current) => ({ ...current, jobId: data.jobId }));
+        return;
+      }
+
+      setForm(EMPTY_FORM);
+      setMode("register");
+      await loadProjects();
+      await onProjectsChanged?.();
+      setSaving(false);
+    } catch (createError) {
+      setError(createError.message);
+      setSaving(false);
+      setLaunchJob(null);
+    }
+  }
+
+  async function runProcessAction(projectId, action) {
+    try {
+      setProcessActionId(`${projectId}:${action}`);
+      setError("");
+
+      const response = await fetch(`${PROJECTS_API}/${projectId}/${action}`, {
+        method: "POST",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message || `No se pudo ejecutar la acción: ${action}`,
+        );
+      }
+
+      await loadProcessStatus(projectId);
+    } catch (actionError) {
+      setError(actionError.message);
+    } finally {
+      setProcessActionId(null);
+    }
   }
 
   async function saveProject(event) {
@@ -340,34 +546,148 @@ function ProjectManager({ onProjectsChanged }) {
           />
         </label>
 
-        <div className="md:col-span-2">
-          <button
-            type="submit"
-            disabled={saving}
-            style={{
-              backgroundColor: "#06b6d4",
-              color: "#020617",
-            }}
-            className="inline-flex items-center gap-2 rounded-lg border border-cyan-300 px-5 py-2.5 font-semibold transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {editingId ? (
-              <Save className="h-4 w-4" />
-            ) : (
-              <Plus className="h-4 w-4" />
-            )}
+        <div className="flex flex-wrap gap-3 md:col-span-2">
+          {!editingId && mode === "create" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => createProject(false)}
+                disabled={saving}
+                className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/40 px-5 py-2.5 font-semibold text-cyan-300 transition hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus className="h-4 w-4" />
+                {saving && !launchJob ? "Creando..." : "Crear solamente"}
+              </button>
 
-            {saving
-              ? mode === "create" && !editingId
-                ? "Creando proyecto..."
-                : "Guardando..."
-              : editingId
-                ? "Guardar cambios"
-                : mode === "create"
-                  ? "Crear proyecto"
+              <button
+                type="button"
+                onClick={() => createProject(true)}
+                disabled={saving}
+                style={{
+                  backgroundColor: "#06b6d4",
+                  color: "#020617",
+                }}
+                className="inline-flex items-center gap-2 rounded-lg border border-cyan-300 px-5 py-2.5 font-semibold transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Rocket className="h-4 w-4" />
+                {saving && launchJob ? "Creando e iniciando..." : "Crear e iniciar"}
+              </button>
+            </>
+          ) : (
+            <button
+              type="submit"
+              disabled={saving}
+              style={{
+                backgroundColor: "#06b6d4",
+                color: "#020617",
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-cyan-300 px-5 py-2.5 font-semibold transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {editingId ? (
+                <Save className="h-4 w-4" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+
+              {saving
+                ? "Guardando..."
+                : editingId
+                  ? "Guardar cambios"
                   : "Agregar proyecto"}
-          </button>
+            </button>
+          )}
         </div>
       </form>
+
+      {launchJob && (
+        <div className="mb-8 rounded-xl border border-white/10 bg-slate-950/50 p-5">
+          <h3 className="mb-4 text-sm font-semibold text-white">
+            Progreso de creación e inicio
+          </h3>
+
+          <ol className="space-y-2">
+            {launchJob.stages.map((stage) => (
+              <li key={stage.name} className="flex items-start gap-3 text-sm">
+                <StageIcon status={stage.status} />
+
+                <div>
+                  <span
+                    className={
+                      stage.status === "failed"
+                        ? "text-red-300"
+                        : stage.status === "completed"
+                          ? "text-emerald-300"
+                          : stage.status === "running"
+                            ? "text-sky-300"
+                            : "text-slate-500"
+                    }
+                  >
+                    {stage.name}
+                  </span>
+
+                  {stage.status === "failed" && stage.message && (
+                    <p className="mt-1 text-xs text-red-400">
+                      {stage.message}
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+
+          {launchJob.status === "completed" && launchJob.result && (
+            <div className="mt-4 space-y-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-200">
+              <p className="font-semibold">
+                Proyecto creado e iniciado correctamente
+              </p>
+
+              <p className="break-all">
+                Frontend:{" "}
+                <a
+                  className="underline"
+                  href={launchJob.result.frontendUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {launchJob.result.frontendUrl}
+                </a>
+              </p>
+
+              <p className="break-all">
+                Backend:{" "}
+                <a
+                  className="underline"
+                  href={launchJob.result.backendUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {launchJob.result.backendUrl}
+                </a>
+              </p>
+
+              <p>Base de datos creada: {launchJob.result.dbName}</p>
+              <p>Dependencias instaladas: Sí</p>
+              <p>Migraciones aplicadas: Sí</p>
+            </div>
+          )}
+
+          {launchJob.status === "failed" && launchJob.error && (
+            <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+              <p className="font-semibold">
+                No se pudo completar la creación e inicio
+              </p>
+
+              <p className="mt-2">{launchJob.error.message}</p>
+
+              {launchJob.error.cleanupWarning && (
+                <p className="mt-2 text-xs text-amber-300">
+                  Advertencia de limpieza: {launchJob.error.cleanupWarning}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {loading ? (
         <p className="text-sm text-slate-400">Cargando proyectos...</p>
@@ -420,6 +740,64 @@ function ProjectManager({ onProjectsChanged }) {
 
                   <p>Rama: {project.default_branch}</p>
                 </div>
+
+                {(() => {
+                  const status = processStatuses[project.id];
+                  const backend = status?.backend;
+                  const frontend = status?.frontend;
+
+                  if (!backend && !frontend) {
+                    return null;
+                  }
+
+                  return (
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                      <span
+                        className={`rounded-full px-2 py-1 ${
+                          backend?.status === "running"
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-slate-500/15 text-slate-400"
+                        }`}
+                      >
+                        Backend: {backend?.status || "detenido"}
+                        {backend?.port ? ` · :${backend.port}` : ""}
+                      </span>
+
+                      <span
+                        className={`rounded-full px-2 py-1 ${
+                          frontend?.status === "running"
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-slate-500/15 text-slate-400"
+                        }`}
+                      >
+                        Frontend: {frontend?.status || "detenido"}
+                        {frontend?.port ? ` · :${frontend.port}` : ""}
+                      </span>
+
+                      {backend?.status === "running" && backend?.url && (
+                        <a
+                          className="break-all text-sky-300 underline"
+                          href={backend.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {backend.url}
+                        </a>
+                      )}
+
+                      {frontend?.status === "running" && frontend?.url && (
+                        <a
+                          className="break-all text-sky-300 underline"
+                          href={frontend.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {frontend.url}
+                        </a>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="flex shrink-0 flex-wrap gap-2">
@@ -445,6 +823,40 @@ function ProjectManager({ onProjectsChanged }) {
 
                   {project.active ? "Desactivar" : "Activar"}
                 </button>
+
+                {project.backend_path && project.frontend_path && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => runProcessAction(project.id, "start")}
+                      disabled={processActionId === `${project.id}:start`}
+                      className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 px-3 py-2 text-sm text-emerald-300 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Play className="h-4 w-4" />
+                      Iniciar
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => runProcessAction(project.id, "stop")}
+                      disabled={processActionId === `${project.id}:stop`}
+                      className="inline-flex items-center gap-2 rounded-lg border border-red-500/30 px-3 py-2 text-sm text-red-300 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Square className="h-4 w-4" />
+                      Detener
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => runProcessAction(project.id, "restart")}
+                      disabled={processActionId === `${project.id}:restart`}
+                      className="inline-flex items-center gap-2 rounded-lg border border-amber-500/30 px-3 py-2 text-sm text-amber-300 transition hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                      Reiniciar
+                    </button>
+                  </>
+                )}
               </div>
             </article>
           ))}

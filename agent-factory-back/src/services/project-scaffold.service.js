@@ -202,8 +202,24 @@ function buildFrontendFiles(slug) {
     "vite.config.js": `import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// PORT y BACKEND_PORT los define Agent Factory al iniciar el proceso
+// (ver project-process-manager.service.js). Los valores por defecto
+// solo aplican si se ejecuta \`npm run dev\` manualmente.
+const port = Number(process.env.PORT) || 5174;
+const backendPort = Number(process.env.BACKEND_PORT) || 3002;
+
 export default defineConfig({
   plugins: [react()],
+  server: {
+    port,
+    strictPort: true,
+    proxy: {
+      "/api": {
+        target: \`http://localhost:\${backendPort}\`,
+        changeOrigin: true,
+      },
+    },
+  },
 });
 `,
 
@@ -274,7 +290,7 @@ dist
   };
 }
 
-function buildBackendFiles(slug) {
+export function buildBackendFiles(slug) {
   return {
     "package.json": `${JSON.stringify(
       {
@@ -284,7 +300,7 @@ function buildBackendFiles(slug) {
         type: "module",
         scripts: {
           start: "node src/server.js",
-          dev: "node --watch src/server.js",
+          dev: "node src/server.js",
         },
         dependencies: {
           cors: "^2.8.5",

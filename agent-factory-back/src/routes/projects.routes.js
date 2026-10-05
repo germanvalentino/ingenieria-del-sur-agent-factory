@@ -9,6 +9,24 @@ import {
   rollbackScaffoldedProject,
   ExistingProjectPathError,
 } from "../services/project-scaffold.service.js";
+import {
+  runProjectCreateAndStart,
+  STAGE_NAMES,
+  ExistingDatabaseError,
+} from "../services/project-launch.service.js";
+import {
+  createJob,
+  onStageFactory,
+  completeJob,
+  failJob,
+  getJob,
+} from "../services/launch-jobs.service.js";
+import {
+  startBackendProcess,
+  startFrontendProcess,
+  stopProjectProcesses,
+  getProjectProcessesStatus,
+} from "../services/project-process-manager.service.js";
 
 const router = Router();
 
@@ -172,35 +190,61 @@ router.post("/", async (req, res) => {
 });
 
 router.post("/scaffold", async (req, res) => {
+  const name = cleanText(req.body.name);
+  const description = cleanText(req.body.description);
+  const projectPath = cleanText(req.body.projectPath);
+  const repositoryUrl = cleanText(req.body.repositoryUrl);
+  const defaultBranch = cleanText(req.body.defaultBranch) || "main";
+  const autoStart = req.body.autoStart === true;
+
+  if (!name) {
+    return res.status(400).json({
+      status: "error",
+      message: "El nombre del proyecto es obligatorio",
+    });
+  }
+
+  if (!projectPath) {
+    return res.status(400).json({
+      status: "error",
+      message:
+        "Debés indicar la carpeta destino del proyecto para crear uno nuevo",
+    });
+  }
+
+  if (autoStart) {
+    const jobId = createJob(STAGE_NAMES);
+    const onStage = onStageFactory(jobId);
+
+    runProjectCreateAndStart({
+      name,
+      description,
+      projectPath,
+      repositoryUrl: repositoryUrl || null,
+      defaultBranch,
+      onStage,
+    })
+      .then((result) => {
+        completeJob(jobId, {
+          project: result.project,
+          frontendUrl: result.frontendUrl,
+          backendUrl: result.backendUrl,
+          frontendPort: result.frontendPort,
+          backendPort: result.backendPort,
+          dbName: result.dbName,
+          dependenciesInstalled: result.dependenciesInstalled,
+          migrationsApplied: result.migrationsApplied,
+        });
+      })
+      .catch((error) => {
+        console.error("Error en creación e inicio automático:", error);
+        failJob(jobId, error);
+      });
+
+    return res.status(202).json({ mode: "job", jobId });
+  }
+
   try {
-    const name = cleanText(req.body.name);
-    const description = cleanText(
-      req.body.description
-    );
-    const projectPath = cleanText(
-      req.body.projectPath
-    );
-    const repositoryUrl = cleanText(
-      req.body.repositoryUrl
-    );
-    const defaultBranch =
-      cleanText(req.body.defaultBranch) || "main";
-
-    if (!name) {
-      return res.status(400).json({
-        status: "error",
-        message: "El nombre del proyecto es obligatorio",
-      });
-    }
-
-    if (!projectPath) {
-      return res.status(400).json({
-        status: "error",
-        message:
-          "Debés indicar la carpeta destino del proyecto para crear uno nuevo",
-      });
-    }
-
     const created =
       await createProjectFromScratch({
         name,
@@ -297,12 +341,164 @@ router.post("/scaffold", async (req, res) => {
       });
     }
 
+    if (error instanceof ExistingDatabaseError) {
+      return res.status(409).json({
+        status: "error",
+        mode: "conflict",
+        message: error.message,
+        details: error.details,
+        ...(error.cleanupWarning && {
+          cleanup_warning: error.cleanupWarning,
+        }),
+      });
+    }
+
     res.status(500).json({
       status: "error",
       message: error.message,
       ...(error.cleanupWarning && {
         cleanup_warning: error.cleanupWarning,
       }),
+    });
+  }
+});
+
+router.get("/jobs/:jobId", (req, res) => {
+  const job = getJob(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({
+      status: "error",
+      message: "No se encontró el proceso de creación indicado",
+    });
+  }
+
+  res.json(job);
+});
+
+async function getProjectOr404(req, res) {
+  const result = await pool.query(
+    "SELECT * FROM projects WHERE id = $1",
+    [req.params.id]
+  );
+
+  if (result.rowCount === 0) {
+    res.status(404).json({
+      status: "error",
+      message: "Proyecto no encontrado",
+    });
+    return null;
+  }
+
+  return result.rows[0];
+}
+
+router.get("/:id/processes", async (req, res) => {
+  try {
+    const project = await getProjectOr404(req, res);
+
+    if (!project) {
+      return;
+    }
+
+    const status = await getProjectProcessesStatus(project.id);
+
+    res.json(status);
+  } catch (error) {
+    console.error("Error consultando procesos del proyecto:", error);
+
+    res.status(500).json({
+      status: "error",
+      message: "No se pudo consultar el estado de los procesos",
+    });
+  }
+});
+
+router.post("/:id/start", async (req, res) => {
+  try {
+    const project = await getProjectOr404(req, res);
+
+    if (!project) {
+      return;
+    }
+
+    if (!project.backend_path || !project.frontend_path) {
+      return res.status(400).json({
+        status: "error",
+        message:
+          "El proyecto necesita frontend_path y backend_path configurados para iniciarse",
+      });
+    }
+
+    const backendResult = await startBackendProcess({ project });
+
+    const frontendResult = await startFrontendProcess({
+      project,
+      backendPort: backendResult.port || backendResult.row?.port,
+    });
+
+    res.json({
+      backend: backendResult,
+      frontend: frontendResult,
+    });
+  } catch (error) {
+    console.error("Error iniciando procesos del proyecto:", error);
+
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+router.post("/:id/stop", async (req, res) => {
+  try {
+    const project = await getProjectOr404(req, res);
+
+    if (!project) {
+      return;
+    }
+
+    await stopProjectProcesses(project.id);
+
+    res.json({ status: "ok" });
+  } catch (error) {
+    console.error("Error deteniendo procesos del proyecto:", error);
+
+    res.status(500).json({
+      status: "error",
+      message: error.message,
+    });
+  }
+});
+
+router.post("/:id/restart", async (req, res) => {
+  try {
+    const project = await getProjectOr404(req, res);
+
+    if (!project) {
+      return;
+    }
+
+    await stopProjectProcesses(project.id);
+
+    const backendResult = await startBackendProcess({ project });
+
+    const frontendResult = await startFrontendProcess({
+      project,
+      backendPort: backendResult.port || backendResult.row?.port,
+    });
+
+    res.json({
+      backend: backendResult,
+      frontend: frontendResult,
+    });
+  } catch (error) {
+    console.error("Error reiniciando procesos del proyecto:", error);
+
+    res.status(500).json({
+      status: "error",
+      message: error.message,
     });
   }
 });

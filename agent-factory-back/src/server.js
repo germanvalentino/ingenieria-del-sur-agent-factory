@@ -4,7 +4,8 @@ import cors from "cors";
 import { pool } from "./db.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import tasksRoutes from "./routes/tasks.routes.js";
-import { recoverInterruptedTasks } from "./services/recovery.service.js";
+import { initializeBackend } from "./services/startup.service.js";
+import { redactSecrets } from "./services/project-process-manager.service.js";
 import projectsRoutes from "./routes/projects.routes.js";
 import specificationsRoutes from "./routes/specifications.routes.js";
 import whatsappRoutes from "./routes/whatsapp.routes.js";
@@ -55,8 +56,7 @@ app.get("/api/db-health", async (req, res) => {
 
 async function startServer() {
   try {
-    const recovery =
-      await recoverInterruptedTasks();
+    const recovery = await initializeBackend();
 
     if (
       recovery.recoveredTasks.length > 0
@@ -106,7 +106,7 @@ async function startServer() {
   } catch (error) {
     console.error(
       "No se pudo iniciar Agent Factory:",
-      error
+      redactSecrets(error?.message || String(error))
     );
 
     process.exit(1);
