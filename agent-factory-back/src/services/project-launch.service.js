@@ -28,6 +28,22 @@ import {
 } from "./project-process-manager.service.js";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_LAUNCH_DEPS = {
+  createProjectFromScratch,
+  rollbackScaffoldedProject,
+  databaseExists,
+  createDatabase,
+  dropDatabase,
+  runSqlFile,
+  getScaffoldPgCredentials,
+  runNpmInstall,
+  findFreePort,
+  startBackendProcess,
+  startFrontendProcess,
+  stopProcess,
+  pool,
+  execFileAsync,
+};
 
 export const STAGE_NAMES = [
   "Generando estructura",
@@ -70,20 +86,24 @@ async function pathExists(targetPath) {
   }
 }
 
-async function ensureGitInitialized(projectPath, defaultBranch) {
+async function ensureGitInitialized(
+  projectPath,
+  defaultBranch,
+  execFileRunner = execFileAsync
+) {
   const gitDir = path.join(projectPath, ".git");
 
   if (await pathExists(gitDir)) {
     return { initialized: false };
   }
 
-  await execFileAsync("git", ["init"], {
+  await execFileRunner("git", ["init"], {
     cwd: projectPath,
     windowsHide: true,
   });
 
   if (isValidBranchName(defaultBranch)) {
-    await execFileAsync(
+    await execFileRunner(
       "git",
       ["symbolic-ref", "HEAD", `refs/heads/${defaultBranch}`],
       { cwd: projectPath, windowsHide: true }
@@ -93,8 +113,13 @@ async function ensureGitInitialized(projectPath, defaultBranch) {
   return { initialized: true };
 }
 
-async function writeBackendEnvFile({ backendPath, port, dbName }) {
-  const credentials = getScaffoldPgCredentials();
+async function writeBackendEnvFile({
+  backendPath,
+  port,
+  dbName,
+  getCredentials = getScaffoldPgCredentials,
+}) {
+  const credentials = getCredentials();
   const envPath = path.join(backendPath, ".env");
 
   const content = [
@@ -151,8 +176,9 @@ async function insertProjectRow({
   backendPath,
   repositoryUrl,
   defaultBranch,
+  dbPool = pool,
 }) {
-  const result = await pool.query(
+  const result = await dbPool.query(
     `
       INSERT INTO projects (
         name, description, frontend_path, backend_path,
@@ -174,7 +200,9 @@ export async function runProjectCreateAndStart({
   repositoryUrl,
   defaultBranch = "main",
   onStage = noopStage,
+  __deps = {},
 }) {
+  const deps = { ...DEFAULT_LAUNCH_DEPS, ...__deps };
   let created = null;
   let project = null;
   let dbName = null;
@@ -188,29 +216,29 @@ export async function runProjectCreateAndStart({
     const warnings = [];
 
     if (backendStarted && project) {
-      await stopProcess(project.id, "backend").catch((error) =>
+      await deps.stopProcess(project.id, "backend").catch((error) =>
         warnings.push(error.message)
       );
     }
 
     if (frontendStarted && project) {
-      await stopProcess(project.id, "frontend").catch((error) =>
+      await deps.stopProcess(project.id, "frontend").catch((error) =>
         warnings.push(error.message)
       );
     }
 
     if (dbCreatedByUs && dbName) {
-      await dropDatabase(dbName).catch((error) => warnings.push(error.message));
+      await deps.dropDatabase(dbName).catch((error) => warnings.push(error.message));
     }
 
     if (project) {
-      await pool
+      await deps.pool
         .query("DELETE FROM projects WHERE id = $1", [project.id])
         .catch((error) => warnings.push(error.message));
     }
 
     if (created) {
-      await rollbackScaffoldedProject(created).catch((error) =>
+      await deps.rollbackScaffoldedProject(created).catch((error) =>
         warnings.push(error.cleanupWarning || error.message)
       );
     }
@@ -223,7 +251,7 @@ export async function runProjectCreateAndStart({
     onStage("Generando estructura", "running");
 
     try {
-      created = await createProjectFromScratch({ name, projectPath });
+      created = await deps.createProjectFromScratch({ name, projectPath });
 
       try {
         project = await insertProjectRow({
@@ -233,9 +261,10 @@ export async function runProjectCreateAndStart({
           backendPath: created.backendPath,
           repositoryUrl,
           defaultBranch,
+          dbPool: deps.pool,
         });
       } catch (dbError) {
-        await rollbackScaffoldedProject(created).catch((rollbackError) => {
+        await deps.rollbackScaffoldedProject(created).catch((rollbackError) => {
           dbError.cleanupWarning =
             rollbackError.cleanupWarning || rollbackError.message;
         });
@@ -254,7 +283,11 @@ export async function runProjectCreateAndStart({
     onStage("Inicializando Git", "running");
 
     try {
-      await ensureGitInitialized(created.projectPath, defaultBranch);
+      await ensureGitInitialized(
+        created.projectPath,
+        defaultBranch,
+        deps.execFileAsync
+      );
       onStage("Inicializando Git", "completed");
     } catch (error) {
       onStage("Inicializando Git", "failed", error.message);
@@ -267,24 +300,24 @@ export async function runProjectCreateAndStart({
     try {
       dbName = assertValidDatabaseIdentifier(toDatabaseIdentifier(name));
 
-      if (await databaseExists(dbName)) {
+      if (await deps.databaseExists(dbName)) {
         throw new ExistingDatabaseError(
           `La base de datos "${dbName}" ya existe: no se modifica ni se recrea.`,
           { dbName }
         );
       }
 
-      await createDatabase(dbName);
+      await deps.createDatabase(dbName);
       dbCreatedByUs = true;
 
-      await pool.query(
+      await deps.pool.query(
         `UPDATE projects
          SET scaffold_db_name = $2, scaffold_db_created_by_tool = TRUE, updated_at = NOW()
          WHERE id = $1`,
         [project.id, dbName]
       );
 
-      backendPort = await findFreePort(
+      backendPort = await deps.findFreePort(
         Number(process.env.SCAFFOLD_BACKEND_PORT_START)
       );
 
@@ -292,6 +325,7 @@ export async function runProjectCreateAndStart({
         backendPath: created.backendPath,
         port: backendPort,
         dbName,
+        getCredentials: deps.getScaffoldPgCredentials,
       });
 
       onStage("Creando base PostgreSQL", "completed");
@@ -304,7 +338,7 @@ export async function runProjectCreateAndStart({
     onStage("Instalando backend", "running");
 
     try {
-      const result = await runNpmInstall({ cwd: created.backendPath });
+      const result = await deps.runNpmInstall({ cwd: created.backendPath });
 
       if (!result.success) {
         const detail = redactSecrets(
@@ -323,7 +357,7 @@ export async function runProjectCreateAndStart({
     onStage("Instalando frontend", "running");
 
     try {
-      const result = await runNpmInstall({ cwd: created.frontendPath });
+      const result = await deps.runNpmInstall({ cwd: created.frontendPath });
 
       if (!result.success) {
         const detail = redactSecrets(
@@ -342,7 +376,7 @@ export async function runProjectCreateAndStart({
     onStage("Aplicando migraciones", "running");
 
     try {
-      await runSqlFile(
+      await deps.runSqlFile(
         dbName,
         path.join(created.backendPath, "database", "001-init.sql")
       );
@@ -356,7 +390,7 @@ export async function runProjectCreateAndStart({
     onStage("Iniciando backend", "running");
 
     try {
-      const result = await startBackendProcess({
+      const result = await deps.startBackendProcess({
         project,
         preferredPort: backendPort,
       });
@@ -373,7 +407,7 @@ export async function runProjectCreateAndStart({
     onStage("Iniciando frontend", "running");
 
     try {
-      const result = await startFrontendProcess({
+      const result = await deps.startFrontendProcess({
         project,
         backendPort,
       });
