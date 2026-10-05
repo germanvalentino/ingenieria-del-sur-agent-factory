@@ -21,3 +21,27 @@ CREATE TABLE IF NOT EXISTS project_processes (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_project_processes_project_type
     ON project_processes (project_id, process_type);
+
+CREATE TABLE IF NOT EXISTS project_launch_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID
+        REFERENCES projects(id) ON DELETE SET NULL,
+    requested_name TEXT,
+    requested_project_path TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+    current_stage TEXT,
+    stages JSONB NOT NULL DEFAULT '[]'::jsonb,
+    result JSONB,
+    error JSONB,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_launch_jobs_project_updated
+    ON project_launch_jobs (project_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_project_launch_jobs_active_request
+    ON project_launch_jobs (requested_name, requested_project_path)
+    WHERE status IN ('pending', 'running');

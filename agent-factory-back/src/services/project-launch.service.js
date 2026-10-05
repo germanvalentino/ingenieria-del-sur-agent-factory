@@ -68,6 +68,8 @@ export class ExistingDatabaseError extends Error {
 
 function noopStage() {}
 
+async function noopProjectCreated() {}
+
 function isValidBranchName(branchName) {
   return (
     /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(branchName) &&
@@ -200,6 +202,7 @@ export async function runProjectCreateAndStart({
   repositoryUrl,
   defaultBranch = "main",
   onStage = noopStage,
+  onProjectCreated = noopProjectCreated,
   __deps = {},
 }) {
   const deps = { ...DEFAULT_LAUNCH_DEPS, ...__deps };
@@ -248,7 +251,7 @@ export async function runProjectCreateAndStart({
 
   try {
     // Etapa 1: Generando estructura
-    onStage("Generando estructura", "running");
+    await onStage("Generando estructura", "running");
 
     try {
       created = await deps.createProjectFromScratch({ name, projectPath });
@@ -263,6 +266,7 @@ export async function runProjectCreateAndStart({
           defaultBranch,
           dbPool: deps.pool,
         });
+        await onProjectCreated(project.id);
       } catch (dbError) {
         await deps.rollbackScaffoldedProject(created).catch((rollbackError) => {
           dbError.cleanupWarning =
@@ -273,14 +277,14 @@ export async function runProjectCreateAndStart({
         throw dbError;
       }
 
-      onStage("Generando estructura", "completed");
+      await onStage("Generando estructura", "completed");
     } catch (error) {
-      onStage("Generando estructura", "failed", error.message);
+      await onStage("Generando estructura", "failed", error.message);
       throw error;
     }
 
     // Etapa 2: Inicializando Git
-    onStage("Inicializando Git", "running");
+    await onStage("Inicializando Git", "running");
 
     try {
       await ensureGitInitialized(
@@ -288,14 +292,14 @@ export async function runProjectCreateAndStart({
         defaultBranch,
         deps.execFileAsync
       );
-      onStage("Inicializando Git", "completed");
+      await onStage("Inicializando Git", "completed");
     } catch (error) {
-      onStage("Inicializando Git", "failed", error.message);
+      await onStage("Inicializando Git", "failed", error.message);
       throw error;
     }
 
     // Etapa 3: Creando base PostgreSQL
-    onStage("Creando base PostgreSQL", "running");
+    await onStage("Creando base PostgreSQL", "running");
 
     try {
       dbName = assertValidDatabaseIdentifier(toDatabaseIdentifier(name));
@@ -328,14 +332,14 @@ export async function runProjectCreateAndStart({
         getCredentials: deps.getScaffoldPgCredentials,
       });
 
-      onStage("Creando base PostgreSQL", "completed");
+      await onStage("Creando base PostgreSQL", "completed");
     } catch (error) {
-      onStage("Creando base PostgreSQL", "failed", error.message);
+      await onStage("Creando base PostgreSQL", "failed", error.message);
       throw error;
     }
 
     // Etapa 4: Instalando backend
-    onStage("Instalando backend", "running");
+    await onStage("Instalando backend", "running");
 
     try {
       const result = await deps.runNpmInstall({ cwd: created.backendPath });
@@ -347,14 +351,14 @@ export async function runProjectCreateAndStart({
         throw new Error(`Falló "npm install" en backend: ${detail}`);
       }
 
-      onStage("Instalando backend", "completed");
+      await onStage("Instalando backend", "completed");
     } catch (error) {
-      onStage("Instalando backend", "failed", error.message);
+      await onStage("Instalando backend", "failed", error.message);
       throw error;
     }
 
     // Etapa 5: Instalando frontend
-    onStage("Instalando frontend", "running");
+    await onStage("Instalando frontend", "running");
 
     try {
       const result = await deps.runNpmInstall({ cwd: created.frontendPath });
@@ -366,28 +370,28 @@ export async function runProjectCreateAndStart({
         throw new Error(`Falló "npm install" en frontend: ${detail}`);
       }
 
-      onStage("Instalando frontend", "completed");
+      await onStage("Instalando frontend", "completed");
     } catch (error) {
-      onStage("Instalando frontend", "failed", error.message);
+      await onStage("Instalando frontend", "failed", error.message);
       throw error;
     }
 
     // Etapa 6: Aplicando migraciones
-    onStage("Aplicando migraciones", "running");
+    await onStage("Aplicando migraciones", "running");
 
     try {
       await deps.runSqlFile(
         dbName,
         path.join(created.backendPath, "database", "001-init.sql")
       );
-      onStage("Aplicando migraciones", "completed");
+      await onStage("Aplicando migraciones", "completed");
     } catch (error) {
-      onStage("Aplicando migraciones", "failed", error.message);
+      await onStage("Aplicando migraciones", "failed", error.message);
       throw error;
     }
 
     // Etapa 7: Iniciando backend
-    onStage("Iniciando backend", "running");
+    await onStage("Iniciando backend", "running");
 
     try {
       const result = await deps.startBackendProcess({
@@ -397,14 +401,14 @@ export async function runProjectCreateAndStart({
 
       backendStarted = true;
       backendPort = result.port || backendPort;
-      onStage("Iniciando backend", "completed");
+      await onStage("Iniciando backend", "completed");
     } catch (error) {
-      onStage("Iniciando backend", "failed", error.message);
+      await onStage("Iniciando backend", "failed", error.message);
       throw error;
     }
 
     // Etapa 8: Iniciando frontend
-    onStage("Iniciando frontend", "running");
+    await onStage("Iniciando frontend", "running");
 
     try {
       const result = await deps.startFrontendProcess({
@@ -414,14 +418,14 @@ export async function runProjectCreateAndStart({
 
       frontendStarted = true;
       frontendPort = result.port;
-      onStage("Iniciando frontend", "completed");
+      await onStage("Iniciando frontend", "completed");
     } catch (error) {
-      onStage("Iniciando frontend", "failed", error.message);
+      await onStage("Iniciando frontend", "failed", error.message);
       throw error;
     }
 
     // Etapa 9: Comprobando servicios
-    onStage("Comprobando servicios", "running");
+    await onStage("Comprobando servicios", "running");
 
     try {
       const backendUrl = `http://localhost:${backendPort}`;
@@ -431,7 +435,7 @@ export async function runProjectCreateAndStart({
       await waitFor(() => checkJsonHealth(`${backendUrl}/api/db-health`));
       await waitFor(() => checkReachable(frontendUrl));
 
-      onStage("Comprobando servicios", "completed");
+      await onStage("Comprobando servicios", "completed");
 
       return {
         project,
@@ -445,7 +449,7 @@ export async function runProjectCreateAndStart({
         migrationsApplied: true,
       };
     } catch (error) {
-      onStage("Comprobando servicios", "failed", error.message);
+      await onStage("Comprobando servicios", "failed", error.message);
       throw error;
     }
   } catch (error) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   Circle,
@@ -15,6 +15,14 @@ import {
   X,
   XCircle,
 } from "lucide-react";
+import {
+  LAUNCH_JOB_STORAGE_KEY,
+  isActiveLaunchJob,
+  resolveConflictingLaunchJob,
+  resolveRestoredLaunchJob,
+  shouldPollLaunchJob,
+} from "./launchJobState.js";
+import { createLaunchJobPoller } from "./launchJobPolling.js";
 
 const PROJECTS_API = "http://localhost:3001/api/projects";
 
@@ -39,6 +47,10 @@ const STAGE_NAMES = [
   "Iniciando frontend",
   "Comprobando servicios",
 ];
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
 
 function StageIcon({ status }) {
   if (status === "completed") {
@@ -69,17 +81,33 @@ function ProjectManager({ onProjectsChanged }) {
   const [launchJob, setLaunchJob] = useState(null);
   const [processStatuses, setProcessStatuses] = useState({});
   const [processActionId, setProcessActionId] = useState(null);
+  const isMountedRef = useRef(false);
+  const createProjectControllerRef = useRef(null);
+  const activeLaunchJob = isActiveLaunchJob(launchJob);
 
-  async function loadProjects() {
+  async function loadProjects({ signal } = {}) {
     try {
+      if (!isMountedRef.current || signal?.aborted) {
+        return;
+      }
+
       setLoading(true);
       setError("");
 
       const response = await fetch(PROJECTS_API, {
         cache: "no-store",
+        signal,
       });
 
+      if (!isMountedRef.current || signal?.aborted) {
+        return;
+      }
+
       const data = await response.json();
+
+      if (!isMountedRef.current || signal?.aborted) {
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(data.message || "No se pudieron cargar los proyectos");
@@ -87,27 +115,147 @@ function ProjectManager({ onProjectsChanged }) {
 
       setProjects(data);
     } catch (loadError) {
+      if (isAbortError(loadError) || !isMountedRef.current || signal?.aborted) {
+        return;
+      }
+
       setError(loadError.message);
     } finally {
-      setLoading(false);
+      if (isMountedRef.current && !signal?.aborted) {
+        setLoading(false);
+      }
     }
   }
 
+  async function fetchLaunchJob(jobId, { signal } = {}) {
+    const response = await fetch(`${PROJECTS_API}/jobs/${jobId}`, {
+      cache: "no-store",
+      signal,
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || "No se pudo consultar el estado de creacion");
+    }
+
+    return data;
+  }
+
+  async function loadLatestLaunchJob({ signal } = {}) {
+    const response = await fetch(`${PROJECTS_API}/jobs/latest`, {
+      cache: "no-store",
+      signal,
+    });
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || "No se pudo recuperar la ultima creacion");
+    }
+
+    return data;
+  }
+
   useEffect(() => {
+    isMountedRef.current = true;
+    const controller = new AbortController();
     const timeoutId = setTimeout(() => {
-      loadProjects();
+      loadProjects({ signal: controller.signal });
     }, 0);
 
-    return () => clearTimeout(timeoutId);
+    return () => {
+      isMountedRef.current = false;
+      createProjectControllerRef.current?.abort();
+      controller.abort();
+      clearTimeout(timeoutId);
+    };
   }, []);
 
-  async function loadProcessStatus(projectId) {
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
+    async function restoreLaunchJob() {
+      try {
+        const storedJobId = window.localStorage.getItem(LAUNCH_JOB_STORAGE_KEY);
+        let restoredJob = null;
+
+        if (storedJobId) {
+          try {
+            restoredJob = await fetchLaunchJob(storedJobId, {
+              signal: controller.signal,
+            });
+          } catch (fetchError) {
+            if (isAbortError(fetchError) || controller.signal.aborted) {
+              return;
+            }
+          }
+        }
+
+        if (cancelled || !isMountedRef.current || controller.signal.aborted) {
+          return;
+        }
+
+        const latestLaunchJob = await loadLatestLaunchJob({
+          signal: controller.signal,
+        });
+
+        if (cancelled || !isMountedRef.current || controller.signal.aborted) {
+          return;
+        }
+
+        const latestJob = resolveRestoredLaunchJob(
+          restoredJob,
+          latestLaunchJob,
+        );
+
+        if (cancelled || !isMountedRef.current || !latestJob) {
+          return;
+        }
+
+        setLaunchJob(latestJob);
+        setSaving(isActiveLaunchJob(latestJob));
+        window.localStorage.setItem(LAUNCH_JOB_STORAGE_KEY, latestJob.jobId);
+      } catch (restoreError) {
+        if (
+          !isAbortError(restoreError) &&
+          !cancelled &&
+          isMountedRef.current &&
+          !controller.signal.aborted
+        ) {
+          setError(restoreError.message);
+        }
+      }
+    }
+
+    restoreLaunchJob();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, []);
+
+  async function loadProcessStatus(projectId, { signal } = {}) {
     try {
       const response = await fetch(`${PROJECTS_API}/${projectId}/processes`, {
         cache: "no-store",
+        signal,
       });
 
+      if (!isMountedRef.current || signal?.aborted) {
+        return;
+      }
+
       const data = await response.json();
+
+      if (!isMountedRef.current || signal?.aborted) {
+        return;
+      }
 
       if (response.ok) {
         setProcessStatuses((current) => ({
@@ -115,7 +263,11 @@ function ProjectManager({ onProjectsChanged }) {
           [projectId]: data,
         }));
       }
-    } catch {
+    } catch (statusError) {
+      if (isAbortError(statusError)) {
+        return;
+      }
+
       // El estado de procesos es informativo: un fallo de red no es crítico.
     }
   }
@@ -125,57 +277,83 @@ function ProjectManager({ onProjectsChanged }) {
       return undefined;
     }
 
-    projects.forEach((project) => loadProcessStatus(project.id));
+    let cancelled = false;
+    let timeoutId = null;
+    const controller = new AbortController();
 
-    const intervalId = setInterval(() => {
-      projects.forEach((project) => loadProcessStatus(project.id));
-    }, 4000);
+    async function pollProcessStatuses() {
+      if (cancelled || !isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
 
-    return () => clearInterval(intervalId);
+      await Promise.all(
+        projects.map((project) =>
+          loadProcessStatus(project.id, { signal: controller.signal }),
+        ),
+      );
+
+      if (cancelled || !isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
+
+      timeoutId = setTimeout(pollProcessStatuses, 4000);
+    }
+
+    pollProcessStatuses();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, [projects]);
 
   useEffect(() => {
-    if (!launchJob?.jobId || launchJob.status !== "running") {
+    if (!shouldPollLaunchJob(launchJob)) {
       return undefined;
     }
 
-    const intervalId = setInterval(async () => {
-      try {
-        const response = await fetch(
-          `${PROJECTS_API}/jobs/${launchJob.jobId}`,
-          { cache: "no-store" },
-        );
+    const jobId = launchJob.jobId;
 
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(
-            data.message || "No se pudo consultar el estado de creación",
-          );
-        }
-
+    const poller = createLaunchJobPoller({
+      jobId,
+      fetchLaunchJob,
+      isMounted: () => isMountedRef.current,
+      onJob: async (data) => {
         setLaunchJob(data);
+        window.localStorage.setItem(LAUNCH_JOB_STORAGE_KEY, data.jobId);
+      },
+      onFinished: async (data, signal) => {
+        setSaving(false);
 
-        if (data.status !== "running") {
-          setSaving(false);
-
-          if (data.status === "completed") {
-            setForm(EMPTY_FORM);
-            setMode("register");
-          }
-
-          await loadProjects();
-          await onProjectsChanged?.();
+        if (data.status === "completed") {
+          setForm(EMPTY_FORM);
         }
-      } catch (pollError) {
+
+        await loadProjects({ signal });
+
+        if (!isMountedRef.current || signal.aborted) {
+          return;
+        }
+
+        if (onProjectsChanged) {
+          await onProjectsChanged();
+        }
+      },
+      onError: async (pollError) => {
         setError(pollError.message);
         setSaving(false);
-      }
-    }, 1200);
+      },
+    });
 
-    return () => clearInterval(intervalId);
+    return () => {
+      poller.stop();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [launchJob?.jobId, launchJob?.status]);
+  }, [launchJob?.jobId]);
 
   function handleChange(event) {
     const { name, value } = event.target;
@@ -212,7 +390,10 @@ function ProjectManager({ onProjectsChanged }) {
     setMode(nextMode);
     setForm(EMPTY_FORM);
     setError("");
-    setLaunchJob(null);
+
+    if (!isActiveLaunchJob(launchJob)) {
+      setLaunchJob(null);
+    }
   }
 
   async function createProject(autoStart) {
@@ -221,7 +402,13 @@ function ProjectManager({ onProjectsChanged }) {
       return;
     }
 
+    let controller = null;
+
     try {
+      createProjectControllerRef.current?.abort();
+      controller = new AbortController();
+      createProjectControllerRef.current = controller;
+
       setSaving(true);
       setError("");
       setLaunchJob(
@@ -253,28 +440,76 @@ function ProjectManager({ onProjectsChanged }) {
           defaultBranch: form.defaultBranch,
           autoStart,
         }),
+        signal: controller.signal,
       });
 
+      if (!isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
+
       const data = await response.json();
+
+      if (!isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
+
+      if (!response.ok && response.status === 409 && data.mode === "job") {
+        const existingJob = await resolveConflictingLaunchJob(
+          data,
+          fetchLaunchJob,
+          controller.signal,
+        );
+
+        if (!isMountedRef.current || controller.signal.aborted) {
+          return;
+        }
+
+        window.localStorage.setItem(LAUNCH_JOB_STORAGE_KEY, existingJob.jobId);
+        setLaunchJob(existingJob);
+        setSaving(isActiveLaunchJob(existingJob));
+        setError("");
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(data.message || "No se pudo crear el proyecto");
       }
 
       if (data.mode === "job") {
+        window.localStorage.setItem(LAUNCH_JOB_STORAGE_KEY, data.jobId);
         setLaunchJob((current) => ({ ...current, jobId: data.jobId }));
         return;
       }
 
       setForm(EMPTY_FORM);
       setMode("register");
-      await loadProjects();
-      await onProjectsChanged?.();
+      await loadProjects({ signal: controller.signal });
+
+      if (!isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
+
+      if (onProjectsChanged) {
+        await onProjectsChanged();
+      }
+
+      if (!isMountedRef.current || controller.signal.aborted) {
+        return;
+      }
+
       setSaving(false);
     } catch (createError) {
+      if (isAbortError(createError) || !isMountedRef.current) {
+        return;
+      }
+
       setError(createError.message);
       setSaving(false);
       setLaunchJob(null);
+    } finally {
+      if (createProjectControllerRef.current === controller) {
+        createProjectControllerRef.current = null;
+      }
     }
   }
 
@@ -287,7 +522,15 @@ function ProjectManager({ onProjectsChanged }) {
         method: "POST",
       });
 
+      if (!isMountedRef.current) {
+        return;
+      }
+
       const data = await response.json();
+
+      if (!isMountedRef.current) {
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(
@@ -297,9 +540,15 @@ function ProjectManager({ onProjectsChanged }) {
 
       await loadProcessStatus(projectId);
     } catch (actionError) {
+      if (!isMountedRef.current) {
+        return;
+      }
+
       setError(actionError.message);
     } finally {
-      setProcessActionId(null);
+      if (isMountedRef.current) {
+        setProcessActionId(null);
+      }
     }
   }
 
@@ -337,7 +586,15 @@ function ProjectManager({ onProjectsChanged }) {
         body: JSON.stringify(body),
       });
 
+      if (!isMountedRef.current) {
+        return;
+      }
+
       const data = await response.json();
+
+      if (!isMountedRef.current) {
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(data.message || "No se pudo guardar el proyecto");
@@ -346,11 +603,24 @@ function ProjectManager({ onProjectsChanged }) {
       cancelEditing();
       setMode("register");
       await loadProjects();
-      await onProjectsChanged?.();
+
+      if (!isMountedRef.current) {
+        return;
+      }
+
+      if (onProjectsChanged) {
+        await onProjectsChanged();
+      }
     } catch (saveError) {
+      if (!isMountedRef.current) {
+        return;
+      }
+
       setError(saveError.message);
     } finally {
-      setSaving(false);
+      if (isMountedRef.current) {
+        setSaving(false);
+      }
     }
   }
 
@@ -371,7 +641,15 @@ function ProjectManager({ onProjectsChanged }) {
         },
       );
 
+      if (!isMountedRef.current) {
+        return;
+      }
+
       const data = await response.json();
+
+      if (!isMountedRef.current) {
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(
@@ -380,8 +658,19 @@ function ProjectManager({ onProjectsChanged }) {
       }
 
       await loadProjects();
-      await onProjectsChanged?.();
+
+      if (!isMountedRef.current) {
+        return;
+      }
+
+      if (onProjectsChanged) {
+        await onProjectsChanged();
+      }
     } catch (statusError) {
+      if (!isMountedRef.current) {
+        return;
+      }
+
       setError(statusError.message);
     }
   }
@@ -552,7 +841,7 @@ function ProjectManager({ onProjectsChanged }) {
               <button
                 type="button"
                 onClick={() => createProject(false)}
-                disabled={saving}
+                disabled={saving || activeLaunchJob}
                 className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/40 px-5 py-2.5 font-semibold text-cyan-300 transition hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Plus className="h-4 w-4" />
@@ -562,7 +851,7 @@ function ProjectManager({ onProjectsChanged }) {
               <button
                 type="button"
                 onClick={() => createProject(true)}
-                disabled={saving}
+                disabled={saving || activeLaunchJob}
                 style={{
                   backgroundColor: "#06b6d4",
                   color: "#020617",
@@ -665,7 +954,39 @@ function ProjectManager({ onProjectsChanged }) {
                 </a>
               </p>
 
-              <p>Base de datos creada: {launchJob.result.dbName}</p>
+              <p>
+                Base PostgreSQL:{" "}
+                {launchJob.result.databaseName || launchJob.result.dbName}
+              </p>
+
+              <div className="flex flex-wrap gap-2 pt-2">
+                <a
+                  className="inline-flex items-center justify-center rounded-lg border border-emerald-300/40 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/10"
+                  href={launchJob.result.frontendUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Abrir frontend
+                </a>
+
+                <a
+                  className="inline-flex items-center justify-center rounded-lg border border-emerald-300/40 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/10"
+                  href={`${launchJob.result.backendUrl}/api/health`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Salud backend
+                </a>
+
+                <a
+                  className="inline-flex items-center justify-center rounded-lg border border-emerald-300/40 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/10"
+                  href={`${launchJob.result.backendUrl}/api/db-health`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Salud PostgreSQL
+                </a>
+              </div>
               <p>Dependencias instaladas: Sí</p>
               <p>Migraciones aplicadas: Sí</p>
             </div>

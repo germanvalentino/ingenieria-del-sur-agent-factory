@@ -17,9 +17,14 @@ import {
 import {
   createJob,
   onStageFactory,
+  attachProjectToJob,
+  updateJobStatus,
   completeJob,
   failJob,
   getJob,
+  getLatestProjectJob,
+  getLatestLaunchJob,
+  getActiveJobForRequest,
 } from "../services/launch-jobs.service.js";
 import {
   startBackendProcess,
@@ -213,33 +218,59 @@ router.post("/scaffold", async (req, res) => {
   }
 
   if (autoStart) {
-    const jobId = createJob(STAGE_NAMES);
+    const activeJob = await getActiveJobForRequest({
+      requestedName: name,
+      requestedProjectPath: projectPath,
+    });
+
+    if (activeJob) {
+      return res.status(409).json({
+        status: "error",
+        mode: "job",
+        message:
+          "Ya existe una creacion e inicio en curso para ese proyecto",
+        job: activeJob,
+        jobId: activeJob.jobId,
+      });
+    }
+
+    const jobId = await createJob(STAGE_NAMES, {
+      requestedName: name,
+      requestedProjectPath: projectPath,
+    });
     const onStage = onStageFactory(jobId);
 
-    runProjectCreateAndStart({
-      name,
-      description,
-      projectPath,
-      repositoryUrl: repositoryUrl || null,
-      defaultBranch,
-      onStage,
-    })
-      .then((result) => {
-        completeJob(jobId, {
-          project: result.project,
-          frontendUrl: result.frontendUrl,
-          backendUrl: result.backendUrl,
-          frontendPort: result.frontendPort,
-          backendPort: result.backendPort,
-          dbName: result.dbName,
-          dependenciesInstalled: result.dependenciesInstalled,
-          migrationsApplied: result.migrationsApplied,
+    setImmediate(() => {
+      updateJobStatus(jobId, "running")
+        .then(() =>
+          runProjectCreateAndStart({
+            name,
+            description,
+            projectPath,
+            repositoryUrl: repositoryUrl || null,
+            defaultBranch,
+            onStage,
+            onProjectCreated: (projectId) =>
+              attachProjectToJob(jobId, projectId),
+          })
+        )
+        .then((result) => {
+          return completeJob(jobId, {
+            project: result.project,
+            frontendUrl: result.frontendUrl,
+            backendUrl: result.backendUrl,
+            frontendPort: result.frontendPort,
+            backendPort: result.backendPort,
+            databaseName: result.dbName,
+            dependenciesInstalled: result.dependenciesInstalled,
+            migrationsApplied: result.migrationsApplied,
+          });
+        })
+        .catch((error) => {
+          console.error("Error en creacion e inicio automatico:", error);
+          return failJob(jobId, error);
         });
-      })
-      .catch((error) => {
-        console.error("Error en creación e inicio automático:", error);
-        failJob(jobId, error);
-      });
+    });
 
     return res.status(202).json({ mode: "job", jobId });
   }
@@ -363,13 +394,39 @@ router.post("/scaffold", async (req, res) => {
   }
 });
 
-router.get("/jobs/:jobId", (req, res) => {
-  const job = getJob(req.params.jobId);
+router.get("/jobs/latest", async (req, res) => {
+  const job = await getLatestLaunchJob();
+
+  if (!job) {
+    return res.status(404).json({
+      status: "error",
+      message: "No se encontrÃ³ un proceso de creaciÃ³n previo",
+    });
+  }
+
+  res.json(job);
+});
+
+router.get("/jobs/:jobId", async (req, res) => {
+  const job = await getJob(req.params.jobId);
 
   if (!job) {
     return res.status(404).json({
       status: "error",
       message: "No se encontró el proceso de creación indicado",
+    });
+  }
+
+  res.json(job);
+});
+
+router.get("/:id/launch-job", async (req, res) => {
+  const job = await getLatestProjectJob(req.params.id);
+
+  if (!job) {
+    return res.status(404).json({
+      status: "error",
+      message: "No se encontrÃ³ un proceso de creaciÃ³n para el proyecto",
     });
   }
 

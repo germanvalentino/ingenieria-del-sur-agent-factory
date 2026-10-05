@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { pool } from "../db.js";
-import { redactSecrets } from "./project-process-manager.service.js";
+import { redactSecrets } from "./secret-redaction.service.js";
 
 // Ruta fija resuelta desde import.meta.url: nunca depende del cwd del
 // proceso ni de un nombre de archivo recibido de afuera. Es la única
@@ -24,7 +23,17 @@ export class SchemaMigrationError extends Error {
   }
 }
 
-export async function ensureProjectLaunchSchema({ db = pool } = {}) {
+async function resolveDb(db) {
+  if (db) {
+    return db;
+  }
+
+  const module = await import("../db.js");
+  return module.pool;
+}
+
+export async function ensureProjectLaunchSchema({ db = null } = {}) {
+  const resolvedDb = await resolveDb(db);
   let sql;
 
   try {
@@ -36,7 +45,7 @@ export async function ensureProjectLaunchSchema({ db = pool } = {}) {
   }
 
   try {
-    await db.query(sql);
+    await resolvedDb.query(sql);
   } catch (error) {
     const sanitized = redactSecrets(error?.message || "error desconocido");
 
