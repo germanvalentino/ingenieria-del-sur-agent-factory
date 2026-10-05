@@ -15,6 +15,7 @@ const EMPTY_FORM = {
   description: "",
   frontendPath: "",
   backendPath: "",
+  projectPath: "",
   repositoryUrl: "",
   defaultBranch: "main",
 };
@@ -23,6 +24,7 @@ function ProjectManager({ onProjectsChanged }) {
   const [projects, setProjects] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState(null);
+  const [mode, setMode] = useState("register");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -69,6 +71,7 @@ function ProjectManager({ onProjectsChanged }) {
 
   function startEditing(project) {
     setEditingId(project.id);
+    setMode("register");
 
     setForm({
       name: project.name || "",
@@ -88,6 +91,12 @@ function ProjectManager({ onProjectsChanged }) {
     setError("");
   }
 
+  function selectMode(nextMode) {
+    setMode(nextMode);
+    setForm(EMPTY_FORM);
+    setError("");
+  }
+
   async function saveProject(event) {
     event.preventDefault();
 
@@ -96,16 +105,30 @@ function ProjectManager({ onProjectsChanged }) {
       setError("");
 
       const isEditing = Boolean(editingId);
+      const isScaffolding = !isEditing && mode === "create";
+
       const url = isEditing
         ? `${PROJECTS_API}/${editingId}`
-        : PROJECTS_API;
+        : isScaffolding
+          ? `${PROJECTS_API}/scaffold`
+          : PROJECTS_API;
+
+      const body = isScaffolding
+        ? {
+            name: form.name,
+            description: form.description,
+            projectPath: form.projectPath,
+            repositoryUrl: form.repositoryUrl,
+            defaultBranch: form.defaultBranch,
+          }
+        : form;
 
       const response = await fetch(url, {
         method: isEditing ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(form),
+        body: JSON.stringify(body),
       });
 
       const data = await response.json();
@@ -115,6 +138,7 @@ function ProjectManager({ onProjectsChanged }) {
       }
 
       cancelEditing();
+      setMode("register");
       await loadProjects();
       await onProjectsChanged?.();
     } catch (saveError) {
@@ -191,6 +215,43 @@ function ProjectManager({ onProjectsChanged }) {
         </div>
       )}
 
+      {!editingId && (
+        <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-slate-950/50 p-1">
+          <button
+            type="button"
+            onClick={() => selectMode("register")}
+            className={`rounded-md px-4 py-2 text-sm font-medium transition ${
+              mode === "register"
+                ? "bg-cyan-500/20 text-cyan-300"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Registrar proyecto existente
+          </button>
+
+          <button
+            type="button"
+            onClick={() => selectMode("create")}
+            className={`rounded-md px-4 py-2 text-sm font-medium transition ${
+              mode === "create"
+                ? "bg-cyan-500/20 text-cyan-300"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            Crear proyecto nuevo desde cero
+          </button>
+        </div>
+      )}
+
+      {!editingId && mode === "create" && (
+        <p className="mb-5 text-sm text-slate-400">
+          Se genera un proyecto base con React + Tailwind (frontend) y
+          Express + Node.js + PostgreSQL (backend) dentro de la carpeta
+          indicada. Esa carpeta no debe existir todavía: si ya existe, el
+          sistema la trata como mantenimiento y no crea nada nuevo ahí.
+        </p>
+      )}
+
       <form
         onSubmit={saveProject}
         className="mb-8 grid gap-4 rounded-xl border border-white/10 bg-slate-950/50 p-5 md:grid-cols-2"
@@ -230,27 +291,43 @@ function ProjectManager({ onProjectsChanged }) {
           />
         </label>
 
-        <label className="text-sm text-slate-300">
-          Carpeta frontend
-          <input
-            name="frontendPath"
-            value={form.frontendPath}
-            onChange={handleChange}
-            placeholder="C:/proyectos/mi-proyecto/front"
-            className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none transition focus:border-cyan-500"
-          />
-        </label>
+        {!editingId && mode === "create" ? (
+          <label className="text-sm text-slate-300 md:col-span-2">
+            Carpeta del proyecto
+            <input
+              required
+              name="projectPath"
+              value={form.projectPath}
+              onChange={handleChange}
+              placeholder="C:/proyectos/mi-proyecto-nuevo"
+              className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none transition focus:border-cyan-500"
+            />
+          </label>
+        ) : (
+          <>
+            <label className="text-sm text-slate-300">
+              Carpeta frontend
+              <input
+                name="frontendPath"
+                value={form.frontendPath}
+                onChange={handleChange}
+                placeholder="C:/proyectos/mi-proyecto/front"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none transition focus:border-cyan-500"
+              />
+            </label>
 
-        <label className="text-sm text-slate-300">
-          Carpeta backend
-          <input
-            name="backendPath"
-            value={form.backendPath}
-            onChange={handleChange}
-            placeholder="C:/proyectos/mi-proyecto/back"
-            className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none transition focus:border-cyan-500"
-          />
-        </label>
+            <label className="text-sm text-slate-300">
+              Carpeta backend
+              <input
+                name="backendPath"
+                value={form.backendPath}
+                onChange={handleChange}
+                placeholder="C:/proyectos/mi-proyecto/back"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none transition focus:border-cyan-500"
+              />
+            </label>
+          </>
+        )}
 
         <label className="text-sm text-slate-300 md:col-span-2">
           URL del repositorio
@@ -280,10 +357,14 @@ function ProjectManager({ onProjectsChanged }) {
             )}
 
             {saving
-              ? "Guardando..."
+              ? mode === "create" && !editingId
+                ? "Creando proyecto..."
+                : "Guardando..."
               : editingId
                 ? "Guardar cambios"
-                : "Agregar proyecto"}
+                : mode === "create"
+                  ? "Crear proyecto"
+                  : "Agregar proyecto"}
           </button>
         </div>
       </form>
