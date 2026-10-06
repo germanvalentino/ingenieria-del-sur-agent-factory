@@ -1226,7 +1226,7 @@ async function correctTask(taskId) {
             </button>
 
             <span className="min-w-0 rounded-full bg-sky-500/15 px-3 py-1 text-xs text-sky-400">
-              Sistema Operativo version <span>1.0</span>
+              Sistema Operativo version <span>1.2</span>
             </span>
           </div>
         </div>
