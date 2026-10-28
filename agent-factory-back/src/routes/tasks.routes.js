@@ -1282,6 +1282,95 @@ REGLAS OBLIGATORIAS:
   }
 });
 
+// Explicit, one-time authorization for a non-independent QA review.
+// This never grants the approval required for integration into main.
+router.post("/:id/qa/authorize-fallback", async (req, res) => {
+  if (req.body?.authorize !== true) {
+    return res.status(400).json({ message: "Se requiere autorizacion explicita del usuario." });
+  }
+  let locked = false;
+  try {
+    const taskResult = await pool.query(
+      `SELECT * FROM tasks WHERE id = $1`, [req.params.id]
+    );
+    const task = taskResult.rows[0];
+    if (!task) return res.status(404).json({ message: "Tarea no encontrada" });
+    if (task.status !== "review" || task.qa_status !== "pending" ||
+        !task.agent_working_path || !task.worktree_path || task.auto_correction_active) {
+      return res.status(409).json({ message: "La tarea no esta pendiente de QA o esta ocupada." });
+    }
+    const { developer, reviewer } = await getCrossQaProvider(task.id);
+    const lastQa = await pool.query(
+      `SELECT provider, error_message FROM task_executions
+       WHERE task_id = $1 AND execution_type = 'qa'
+       ORDER BY started_at DESC, id DESC LIMIT 1`, [task.id]
+    );
+    const failure = lastQa.rows[0];
+    if (!failure || failure.provider !== reviewer ||
+        !getProviderFailure(new Error(failure.error_message || "")).isProviderFailure) {
+      return res.status(409).json({ message: "No hay un bloqueo de proveedor QA cruzado que habilite esta excepcion." });
+    }
+    const lock = await pool.query(
+      `UPDATE tasks SET auto_correction_active = TRUE, auto_correction_stage = 'qa',
+       qa_status = 'running', updated_at = NOW()
+       WHERE id = $1 AND auto_correction_active = FALSE AND qa_status = 'pending'
+       RETURNING id`, [task.id]
+    );
+    if (!lock.rowCount) return res.status(409).json({ message: "QA ya esta en curso" });
+    locked = true;
+    const agent = await pool.query(
+      `SELECT id FROM agents WHERE role = 'qa' AND active = TRUE LIMIT 1`
+    );
+    if (!agent.rows.length) throw new Error("No existe un QA Agent activo");
+    const attempt = await runProviderBackedAttempt({
+      taskId: task.id,
+      agentId: agent.rows[0].id,
+      executionType: 'qa',
+      originalProvider: developer,
+      allowFallback: false,
+      capability: 'qa',
+      sandbox: 'read-only',
+      runWithProvider: (provider) => runQaValidation({
+        workingDirectory: task.agent_working_path,
+        projectDirectories: getQaProjectDirectories(task),
+        baseBranch: task.base_branch || 'main',
+        provider,
+        taskTitle: task.title,
+        taskDescription: task.description,
+        correctionFeedback: task.correction_feedback,
+      }),
+      getStatus: (result) => result.status,
+      getMetadata: (result) => ({ usage: result.aiUsage, model: result.aiModel }),
+    });
+    const summary = [
+      'QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO',
+      `Desarrollo: ${developer}; QA alternativo: ${developer}; QA cruzado pendiente: ${reviewer}`,
+      `Resultado provisional: ${attempt.result.status}`,
+      'Esta revision NO es independiente y NO autoriza integrar a main.',
+      '', attempt.result.summary,
+    ].join('\n');
+    const updated = await pool.query(
+      `UPDATE tasks SET qa_status = 'pending', qa_summary = $2,
+       auto_correction_active = FALSE, auto_correction_stage = NULL,
+       qa_finished_at = NOW(), updated_at = NOW()
+       WHERE id = $1 RETURNING *`, [task.id, summary.slice(-15000)]
+    );
+    locked = false;
+    return res.json(updated.rows[0]);
+  } catch (error) {
+    console.error('Error en QA alternativo autorizado:', error);
+    return res.status(500).json({ message: error.message });
+  } finally {
+    if (locked) {
+      await pool.query(
+        `UPDATE tasks SET qa_status = 'pending', auto_correction_active = FALSE,
+         auto_correction_stage = NULL, updated_at = NOW() WHERE id = $1`,
+        [req.params.id]
+      ).catch((error) => console.error('No se pudo liberar QA:', error));
+    }
+  }
+});
+
 router.post(
   "/:id/qa",
   async (req, res) => {

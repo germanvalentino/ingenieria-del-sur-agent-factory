@@ -1009,6 +1009,27 @@ async function runQa(taskId) {
   }
 }
 
+async function authorizeQaFallback(taskId) {
+  if (!window.confirm("El QA alternativo sera realizado por el mismo proveedor que desarrollo. No es independiente y NO habilita la integracion a main. ¿Autorizar esta revision provisional?")) return;
+  try {
+    setQaTaskId(taskId);
+    setError("");
+    const response = await fetch(`${API_URL}/tasks/${taskId}/qa/authorize-fallback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ authorize: true }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || "No se pudo ejecutar QA alternativo");
+    await loadDashboard();
+  } catch (err) {
+    setError(getErrorMessage(err));
+    await loadDashboard();
+  } finally {
+    setQaTaskId(null);
+  }
+}
+
 async function rejectTask(taskId) {
   const notes = window.prompt(
     "Escribí las observaciones que deberá corregir el agente:"
@@ -1628,6 +1649,19 @@ async function correctTask(taskId) {
                               </pre>
                             </details>
                           )}
+                          {task.status === "review" && task.qa_status === "pending" &&
+                            /usage limit|rate limit|quota|cuota|tokens|credits|límite de uso/i.test(task.qa_summary || "") &&
+                            !/QA ALTERNATIVO AUTORIZADO/i.test(task.qa_summary || "") && (
+                              <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                                <p className="text-sm font-semibold text-amber-200">QA cruzado bloqueado: el revisor no tiene cuota disponible.</p>
+                                <p className="mt-2 text-xs text-amber-100">Podés esperar y reintentar el QA cruzado, o autorizar una revisión provisional con el proveedor que desarrolló. Esta última no habilita integrar a main.</p>
+                                <button type="button" onClick={() => authorizeQaFallback(task.id)}
+                                  disabled={qaTaskId !== null || hasActiveAutomaticCycle}
+                                  className="mt-3 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50">
+                                  Autorizar QA alternativo
+                                </button>
+                              </div>
+                            )}
                           {task.qa_summary && (
                             <details className="mt-3 min-w-0 rounded-lg border border-white/10 bg-black/20 p-3">
                               <summary
