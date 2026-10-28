@@ -44,16 +44,6 @@ function assertProviderAllowedForRole({
   const normalizedProvider =
     assertValidProvider(provider);
 
-  if (
-    assignedRole === "qa" &&
-    normalizedProvider === "claude"
-  ) {
-    const error = new Error(
-      "QA debe conservar su proveedor actual; Claude no esta habilitado para tareas QA"
-    );
-    error.statusCode = 400;
-    throw error;
-  }
 
   return normalizedProvider;
 }
@@ -126,6 +116,7 @@ async function runProviderBackedAttempt({
   runWithProvider,
   getStatus = () => "passed",
   getMetadata = executionMetadata,
+  allowFallback = true,
 }) {
   const primaryProvider =
     assertValidProvider(originalProvider);
@@ -196,7 +187,7 @@ async function runProviderBackedAttempt({
     const providerFailure =
       getProviderFailure(primaryError);
 
-    if (!providerFailure.isProviderFailure) {
+    if (!providerFailure.isProviderFailure || !allowFallback) {
       throw primaryError;
     }
 
@@ -398,6 +389,29 @@ ${allowedPathsPrompt}
 `;
 }
 
+// Select the reviewer from the provider that actually wrote the latest changes.
+// A development fallback or an automatic correction can change that provider.
+async function getCrossQaProvider(taskId) {
+  const result = await pool.query(
+    `SELECT provider FROM task_executions
+     WHERE task_id = $1
+       AND execution_type IN ('development', 'correction')
+       AND status = 'passed'
+     ORDER BY started_at DESC, id DESC LIMIT 1`,
+    [taskId]
+  );
+  if (!result.rows.length) {
+    throw new Error('QA cruzado pendiente: no se encontro una ejecucion de desarrollo exitosa.');
+  }
+  const developer = assertValidProvider(result.rows[0].provider);
+  const reviewer = getAlternativeProvider(developer);
+  if (!['codex', 'claude'].includes(developer) ||
+      !['codex', 'claude'].includes(reviewer)) {
+    throw new Error(`QA cruzado pendiente: proveedor ${developer} sin revisor independiente.`);
+  }
+  return { developer, reviewer };
+}
+
 async function runQaAttempt({
   task,
   qaAgent,
@@ -418,13 +432,14 @@ async function runQaAttempt({
   );
 
   try {
+    const { developer, reviewer } = await getCrossQaProvider(task.id);
     const providerAttempt =
       await runProviderBackedAttempt({
         taskId: task.id,
         agentId: qaAgent.id,
         executionType: "qa",
-        originalProvider:
-          qaAgent.provider || "codex",
+        originalProvider: reviewer,
+        allowFallback: false, // Never let the author review their own code.
         capability: "qa",
         sandbox: "read-only",
         runWithProvider: (provider) =>
@@ -453,6 +468,7 @@ async function runQaAttempt({
 
     const finalSummary = [
       `QA automatico intento ${attemptNumber}`,
+      `QA cruzado: desarrollo=${developer}; revision=${reviewer}`,
       "",
       fallbackEventNotice(
         providerAttempt.fallbackEvent
@@ -490,6 +506,7 @@ async function runQaAttempt({
       },
     };
   } catch (error) {
+    error.crossQaBlocked = true;
     throw error;
   }
 }
@@ -1600,7 +1617,7 @@ router.post(
       await pool.query(
         `
           UPDATE tasks
-          SET qa_status = 'failed',
+          SET qa_status = $3,
               qa_summary = $2,
               auto_correction_active = FALSE,
               auto_correction_stage = NULL,
@@ -1611,6 +1628,7 @@ router.post(
         [
           req.params.id,
           error.message.slice(-15000),
+          error.crossQaBlocked ? "pending" : "failed",
         ]
       );
 
