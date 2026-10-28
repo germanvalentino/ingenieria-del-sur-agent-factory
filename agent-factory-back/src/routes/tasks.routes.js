@@ -105,7 +105,7 @@ async function appendFallbackEventToExecution({
         CONCAT_WS(
           E'\\n\\n',
           error_message,
-          $2
+          $2::text
         )
       WHERE id = $1
     `,
