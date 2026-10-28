@@ -1010,7 +1010,7 @@ async function runQa(taskId) {
 }
 
 async function authorizeQaFallback(taskId) {
-  if (!window.confirm("El QA alternativo sera realizado por el mismo proveedor que desarrollo. No es independiente y NO habilita la integracion a main. ¿Autorizar esta revision provisional?")) return;
+  if (!window.confirm("El QA alternativo sera realizado por el mismo proveedor que desarrollo. No es independiente y requiere otra confirmacion humana para integrar a main. ¿Autorizar esta revision provisional?")) return;
   try {
     setQaTaskId(taskId);
     setError("");
@@ -1166,14 +1166,16 @@ async function correctTask(taskId) {
     }
   }
 
-  async function approveTask(taskId) {
+  async function approveTask(taskId, provisional = false) {
+    if (provisional && !window.confirm("El QA alternativo fue realizado por el mismo proveedor que desarrolló. NO hubo revisión independiente. ¿Aprobás excepcionalmente e integrás a main?")) return;
     try {
       rememberQueuePosition(taskId);
       setError("");
 
       const response = await fetch(
         `${API_URL}/tasks/${taskId}/approve`,
-        { method: "POST" }
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ approveProvisionalQa: provisional }) }
       );
       const data = await response.json();
 
@@ -1654,7 +1656,7 @@ async function correctTask(taskId) {
                             !/QA ALTERNATIVO AUTORIZADO/i.test(task.qa_summary || "") && (
                               <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
                                 <p className="text-sm font-semibold text-amber-200">QA cruzado bloqueado: el revisor no tiene cuota disponible.</p>
-                                <p className="mt-2 text-xs text-amber-100">Podés esperar y reintentar el QA cruzado, o autorizar una revisión provisional con el proveedor que desarrolló. Esta última no habilita integrar a main.</p>
+                                <p className="mt-2 text-xs text-amber-100">Podés esperar y reintentar el QA cruzado, o autorizar una revisión provisional con el proveedor que desarrolló. Esta última requiere confirmación humana adicional antes de integrar a main.</p>
                                 <button type="button" onClick={() => authorizeQaFallback(task.id)}
                                   disabled={qaTaskId !== null || hasActiveAutomaticCycle}
                                   className="mt-3 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50">
@@ -1662,17 +1664,36 @@ async function correctTask(taskId) {
                                 </button>
                               </div>
                             )}
+                          {task.qa_status === "pending" && /QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO/i.test(task.qa_summary || "") && (
+                            <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                              <p className="text-sm font-semibold text-amber-200">
+                                {/Resultado provisional: passed/i.test(task.qa_summary || "")
+                                  ? "QA alternativo aprobado · provisional"
+                                  : /Resultado provisional: failed/i.test(task.qa_summary || "")
+                                    ? "QA alternativo rechazado · provisional"
+                                    : "QA alternativo completado · provisional"}
+                              </p>
+                              <p className="mt-2 text-xs text-amber-100">
+                                Revisión autorizada por el usuario, realizada por el mismo proveedor que desarrolló. El QA cruzado independiente no se realizó. Podés aprobar excepcionalmente con confirmación humana.
+                              </p>
+                              <p className="mt-2 text-xs text-amber-100">Cuando el proveedor contrario recupere cuota, usá «Ejecutar QA» para completar la revisión cruzada.</p>
+                            </div>
+                          )}
                           {task.qa_summary && (
                             <details className="mt-3 min-w-0 rounded-lg border border-white/10 bg-black/20 p-3">
                               <summary
                                 className={`cursor-pointer text-xs font-medium ${
                                   task.qa_status === "passed"
                                     ? "text-emerald-300"
-                                    : "text-red-300"
+                                    : task.qa_status === "pending"
+                                      ? "text-amber-300"
+                                      : "text-red-300"
                                 }`}
                               >
                                 Ver resultado QA ·{" "}
-                                {task.qa_status}
+                                {task.qa_status === "pending" && /QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO/i.test(task.qa_summary || "")
+                                  ? "provisional · QA cruzado pendiente"
+                                  : task.qa_status}
                               </summary>
 
                               <pre className="mt-3 max-h-80 max-w-full overflow-y-auto whitespace-pre-wrap break-words text-xs text-slate-400">
@@ -2109,7 +2130,9 @@ async function correctTask(taskId) {
 
       {task.qa_status === "failed"
         ? "Reintentar QA"
-        : "Ejecutar QA"}
+        : /QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO/i.test(task.qa_summary || "")
+          ? "Repetir QA cruzado (opcional)"
+          : "Ejecutar QA"}
     </button>
   )}
 
@@ -2128,11 +2151,13 @@ async function correctTask(taskId) {
 
 {task.status === "review" &&
   !task.review_feedback &&
-  task.qa_status === "passed" && (
+  (task.qa_status === "passed" || (task.qa_status === "pending" &&
+    /QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO/i.test(task.qa_summary || "") &&
+    /Resultado provisional: passed/i.test(task.qa_summary || ""))) && (
     <button
       type="button"
       onClick={() =>
-        approveTask(task.id)
+        approveTask(task.id, task.qa_status !== "passed")
       }
       disabled={
         hasActiveAutomaticCycle ||
@@ -2148,7 +2173,7 @@ async function correctTask(taskId) {
       ) : (
         <>
           <CheckCircle2 size={14} />
-          Aprobar
+          {task.qa_status === "passed" ? "Aprobar" : "Aprobar QA alternativo"}
         </>
       )}
     </button>

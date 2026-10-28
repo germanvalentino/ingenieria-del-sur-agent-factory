@@ -1282,8 +1282,8 @@ REGLAS OBLIGATORIAS:
   }
 });
 
-// Explicit, one-time authorization for a non-independent QA review.
-// This never grants the approval required for integration into main.
+// Explicit authorization for non-independent QA. A successful result can be
+// approved only by a second, explicit human confirmation at /:id/approve.
 router.post("/:id/qa/authorize-fallback", async (req, res) => {
   if (req.body?.authorize !== true) {
     return res.status(400).json({ message: "Se requiere autorizacion explicita del usuario." });
@@ -1346,7 +1346,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
       'QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO',
       `Desarrollo: ${developer}; QA alternativo: ${developer}; QA cruzado pendiente: ${reviewer}`,
       `Resultado provisional: ${attempt.result.status}`,
-      'Esta revision NO es independiente y NO autoriza integrar a main.',
+      'Esta revision NO es independiente. Requiere aprobacion humana explicita para integrar a main.',
       '', attempt.result.summary,
     ].join('\n');
     const updated = await pool.query(
@@ -2197,13 +2197,32 @@ router.post(
         });
       }
 
-      if (task.qa_status !== "passed") {
-  return res.status(409).json({
-    status: "error",
-    message:
-      "La tarea necesita QA aprobado antes de integrarse a main",
-  });
-}
+      // A non-independent QA result is never silently treated as cross-provider QA.
+      // The server verifies the recorded authorization and successful execution,
+      // then requires a second, explicit approval confirmation.
+      const provisionalPassed = task.qa_status === "pending" &&
+        /^QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO\n/m.test(task.qa_summary || "") &&
+        /^Resultado provisional: passed$/m.test(task.qa_summary || "");
+      if (task.qa_status !== "passed" && !provisionalPassed) {
+        return res.status(409).json({ status: "error",
+          message: "La tarea necesita QA aprobado antes de integrarse a main" });
+      }
+      if (provisionalPassed) {
+        if (req.body?.approveProvisionalQa !== true) {
+          return res.status(409).json({ status: "error",
+            message: "Se requiere confirmación humana explícita para aprobar QA alternativo no independiente." });
+        }
+        const { developer } = await getCrossQaProvider(task.id);
+        const execution = await pool.query(
+          `SELECT provider, status FROM task_executions
+           WHERE task_id = $1 AND execution_type = 'qa'
+           ORDER BY started_at DESC, id DESC LIMIT 1`, [task.id]);
+        const last = execution.rows[0];
+        if (!last || last.provider !== developer || last.status !== "passed") {
+          return res.status(409).json({ status: "error",
+            message: "No se pudo verificar una ejecución exitosa del QA alternativo." });
+        }
+      }
 
       if (!task.worktree_path) {
         return res.status(409).json({
@@ -2252,7 +2271,7 @@ router.post(
             task.id,
             result.commitHash,
             warning,
-            `\n\nAPROBACIÓN HUMANA:\nCommit ${result.commitHash} integrado a ${task.base_branch || "main"}.`,
+            `${provisionalPassed ? "\n\nAPROBACIÓN HUMANA EXCEPCIONAL: QA alternativo autorizado y aprobado; NO hubo revisión cruzada independiente." : "\n\nAPROBACIÓN HUMANA: QA cruzado aprobado."}\nCommit ${result.commitHash} integrado a ${task.base_branch || "main"}.`,
           ]
         );
 
