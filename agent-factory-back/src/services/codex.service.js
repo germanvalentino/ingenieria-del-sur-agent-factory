@@ -23,7 +23,7 @@ function classifyCodexProviderFailure(message) {
   }
 
   if (
-    /\b(rate\s*limit|rate.?limited|quota|cuota|too\s+many\s+requests|429)\b/i.test(
+    /\b(rate\s*limit|rate.?limited|quota|cuota|too\s+many\s+requests|429|usage\s+limit(?:s)?|hit\s+(?:your\s+)?(?:usage\s+)?limit|usage\s+(?:cap|exceeded)|try\s+again\s+at\s+\d{1,2}:\d{2})\b/i.test(
       text
     )
   ) {

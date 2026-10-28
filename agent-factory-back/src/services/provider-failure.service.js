@@ -2,7 +2,7 @@ const PROVIDER_FAILURE_PATTERNS = [
   {
     reason: "rate limit o cuota",
     pattern:
-      /\b(429|too\s+many\s+requests|rate\s*limit(?:ed)?|quota\s+exceeded|exceeded\s+quota|insufficient\s+quota|cuota\s+excedida|limite\s+de\s+cuota|l[ií]mite\s+de\s+cuota)\b/i,
+      /\b(429|too\s+many\s+requests|rate\s*limit(?:ed)?|quota\s+exceeded|exceeded\s+quota|insufficient\s+quota|cuota\s+excedida|limite\s+de\s+cuota|l[ií]mite\s+de\s+cuota|usage\s+limit(?:s)?|hit\s+(?:your\s+)?(?:usage\s+)?limit|usage\s+(?:cap|exceeded)|try\s+again\s+at\s+\d{1,2}:\d{2})\b/i,
   },
   {
     reason: "error 5xx del proveedor",
