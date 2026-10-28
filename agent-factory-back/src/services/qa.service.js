@@ -762,7 +762,7 @@ async function getGitChanges(
    * Hace visibles en git diff también los archivos
    * nuevos, sin agregarlos realmente al commit.
    */
-  const MAX_DIFF_SIZE = 120000;
+  const MAX_DIFF_SIZE = 500000;
   const repositoryRoot = validateDirectory(
     await runGit(
       ["rev-parse", "--show-toplevel"],

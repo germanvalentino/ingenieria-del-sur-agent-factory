@@ -734,9 +734,14 @@ export async function executeClaude({
       sandbox
     );
 
+  // Node.js rechaza argumentos con bytes NUL; normalizamos solo el prompt.
+  if (typeof prompt !== "string") {
+    throw new TypeError("El prompt de Claude debe ser un string");
+  }
+  const safePrompt = prompt.replace(/\u0000/g, "");
   const claudeArgs = [
     "-p",
-    prompt,
+    safePrompt,
     "--model",
     model,
     "--output-format",
