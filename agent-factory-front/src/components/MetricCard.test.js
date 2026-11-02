@@ -13,9 +13,9 @@ test("el indicador distingue actividad, reposo y las métricas habituales", asyn
   try {
     const { default: MetricCard } = await server.ssrLoadModule("/src/components/MetricCard.jsx");
     const icon = (props) => createElement("svg", props);
-    const render = (value, execution = true) => renderToStaticMarkup(
+    const render = (value, execution = true, limit) => renderToStaticMarkup(
       createElement(MetricCard, {
-        title: "En ejecución", value, execution, icon, color: "text-violet-400",
+        title: "En ejecución", value, execution, limit, icon, color: "text-violet-400",
       }),
     );
 
@@ -28,6 +28,14 @@ test("el indicador distingue actividad, reposo y las métricas habituales", asyn
       assert.match(html, /min-w-0/);
       assert.match(html, /break-words/);
     }
+
+    const limited = render(1, true, 2);
+    assert.match(limited, />1 \/ 2<\/strong>/);
+    assert.match(limited, /border-violet-400\/50/);
+    assert.match(limited, /1 tarea en ejecución/);
+    const limitedIdle = render(0, true, 2);
+    assert.match(limitedIdle, />0 \/ 2<\/strong>/);
+    assert.doesNotMatch(limitedIdle, /animate-spin/);
 
     const idle = render(0);
     assert.match(idle, /Sin tareas en ejecución/);

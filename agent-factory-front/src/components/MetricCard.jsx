@@ -6,6 +6,7 @@ export default function MetricCard({
   icon: Icon,
   color,
   execution = false,
+  limit,
 }) {
   const isRunning = execution && Number(value) > 0;
 
@@ -23,7 +24,7 @@ export default function MetricCard({
       </div>
 
       <strong className="mt-3 block break-words text-3xl text-white tabular-nums">
-        {value}
+        {value}{execution && limit != null ? ` / ${limit}` : ""}
       </strong>
 
       {execution && (

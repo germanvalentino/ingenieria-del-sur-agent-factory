@@ -4,7 +4,8 @@ import cors from "cors";
 import healthRoutes from "./routes/health.routes.js";
 import { pool } from "./db.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
-import tasksRoutes from "./routes/tasks.routes.js";
+import tasksRoutes, { executeQueuedTask } from "./routes/tasks.routes.js";
+import { acquireExecutionOwner, taskQueue } from "./services/task-queue.service.js";
 import { initializeBackend } from "./services/startup.service.js";
 import { redactSecrets } from "./services/project-process-manager.service.js";
 import projectsRoutes from "./routes/projects.routes.js";
@@ -51,7 +52,9 @@ app.get("/api/db-health", async (req, res) => {
 
 async function startServer() {
   try {
+    await acquireExecutionOwner();
     const recovery = await initializeBackend();
+    taskQueue.start(executeQueuedTask);
 
     if (
       recovery.recoveredTasks.length > 0

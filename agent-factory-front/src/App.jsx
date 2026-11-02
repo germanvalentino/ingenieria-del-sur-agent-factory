@@ -732,7 +732,7 @@ function App() {
   }, [dashboard.tasks]);
 
   useEffect(() => {
-    if (!hasActiveAutomaticCycle) {
+    if (!hasActiveAutomaticCycle && !dashboard.metrics.runningTasks && !dashboard.metrics.queuedTasks) {
       return undefined;
     }
 
@@ -742,7 +742,7 @@ function App() {
     }, 2500);
 
     return () => window.clearInterval(intervalId);
-  }, [hasActiveAutomaticCycle, loadDashboard]);
+  }, [hasActiveAutomaticCycle, loadDashboard, dashboard.metrics.runningTasks, dashboard.metrics.queuedTasks]);
 
   async function toggleTaskHistory(taskId) {
     const shouldOpen = openHistoryTaskId !== taskId;
@@ -877,18 +877,6 @@ function App() {
       rememberQueuePosition(taskId);
       setRunningTaskIds((previous) => new Set([...previous, taskId]));
       setError("");
-
-      setDashboard((current) => ({
-        ...current,
-        tasks: current.tasks.map((task) =>
-          task.id === taskId
-            ? {
-                ...task,
-                status: "running",
-              }
-            : task
-        ),
-      }));
 
       const response = await fetch(
         `${API_URL}/tasks/${taskId}/run`,
@@ -1348,7 +1336,7 @@ async function correctTask(taskId) {
               />
 
               <MetricCard
-                title="En cola"
+                title="Pendientes de ejecución"
                 value={
                   dashboard.metrics.queuedTasks
                 }
@@ -1362,6 +1350,7 @@ async function correctTask(taskId) {
                   dashboard.metrics.runningTasks
                 }
                 execution
+                limit={dashboard.executionQueue?.limit}
                 icon={Bot}
                 color="text-violet-400"
               />
@@ -2113,12 +2102,12 @@ async function correctTask(taskId) {
                                 runTask(task.id)
                               }
                               disabled={
-                                runningTaskIds.has(task.id)
+                                runningTaskIds.has(task.id) || Boolean(task.execution_requested_at)
                               }
                               className="flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-50"
                             >
                               <Play size={14} />
-                              Ejecutar
+                              {task.execution_requested_at ? "En espera" : "Ejecutar"}
                             </button>
                           )}
 

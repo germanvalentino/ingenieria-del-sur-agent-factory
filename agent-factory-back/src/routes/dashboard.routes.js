@@ -1,3 +1,4 @@
+import { taskQueue } from "../services/task-queue.service.js";
 import { Router } from "express";
 import { pool } from "../db.js";
 import { isQaFallbackEligible } from "../services/qa-fallback-eligibility.js";
@@ -7,7 +8,7 @@ const router = Router();
 
 router.get("/", async (req, res) => {
   try {
-    const [projectsResult, agentsResult, tasksResult] = await Promise.all([
+    const [projectsResult, agentsResult, tasksResult, queueResult] = await Promise.all([
       pool.query(`
         SELECT *
         FROM projects
@@ -51,6 +52,10 @@ router.get("/", async (req, res) => {
         ORDER BY t.created_at DESC
         LIMIT 50
       `),
+      pool.query(`SELECT
+        COUNT(*) FILTER (WHERE status = 'running' AND execution_requested_at IS NOT NULL)::int AS active,
+        COUNT(*) FILTER (WHERE status = 'queued' AND execution_requested_at IS NOT NULL)::int AS pending
+        FROM tasks`),
     ]);
 
     const tasks = tasksResult.rows.map(({ latest_development_provider, latest_qa_provider,
@@ -75,14 +80,15 @@ router.get("/", async (req, res) => {
           model: getDisplayModel("claude"),
         },
       },
+      executionQueue: {
+        active: queueResult.rows[0].active,
+        pending: queueResult.rows[0].pending,
+        limit: taskQueue.limit,
+      },
       metrics: {
         totalTasks: tasks.length,
-        queuedTasks: tasks.filter(
-          (task) => task.status === "queued"
-        ).length,
-        runningTasks: tasks.filter(
-          (task) => task.status === "running"
-        ).length,
+        queuedTasks: queueResult.rows[0].pending,
+        runningTasks: queueResult.rows[0].active,
         passedTasks: tasks.filter(
           (task) => task.status === "passed"
         ).length,

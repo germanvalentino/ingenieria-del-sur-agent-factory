@@ -1,3 +1,4 @@
+import { taskQueue } from "../services/task-queue.service.js";
 import { executionDiagnostics } from "../services/execution-diagnostics.service.js";
 import { performance } from "node:perf_hooks";
 import { blockingQa } from "../services/selective-context.service.js";
@@ -898,6 +899,7 @@ router.post(
               updated_at = NOW()
           WHERE id = $1
             AND status = 'failed'
+            AND execution_requested_at IS NULL
           RETURNING *
         `,
         [req.params.id]
@@ -977,6 +979,27 @@ router.get(
 
 
 router.post("/:id/run", async (req, res) => {
+  try {
+    const task = await taskQueue.enqueue(req.params.id);
+    if (!task) return res.status(409).json({ status: "error", message: "La tarea no existe o no esta en cola" });
+    res.status(202).json(task);
+  } catch (error) {
+    console.error("Error encolando tarea:", executionDiagnostics(error, { operation: "development", taskId: req.params.id, durationMs: 0 }));
+    res.status(500).json({ status: "error", message: error.message });
+  }
+});
+
+export async function executeQueuedTask(taskId) {
+  let statusCode = 200;
+  const response = {
+    status(code) { statusCode = code; return this; },
+    json(body) { return body; },
+  };
+  await runDevelopment({ params: { id: taskId } }, response);
+  return statusCode;
+}
+
+async function runDevelopment(req, res) {
   const diagnosticStarted = performance.now();
   let agentId;
   let worktree;
@@ -1302,6 +1325,7 @@ REGLAS OBLIGATORIAS:
       `
         UPDATE tasks
         SET status = 'review',
+            execution_requested_at = NULL,
             result_summary = $2,
             execution_finished_at = NOW(),
             updated_at = NOW()
@@ -1345,10 +1369,11 @@ REGLAS OBLIGATORIAS:
       executionDiagnostics(error, { operation: "development", taskId: req.params.id, durationMs: performance.now() - diagnosticStarted })
     );
 
-    await pool.query(
+    if (taskWasMarkedRunning) await pool.query(
       `
         UPDATE tasks
         SET status = 'failed',
+            execution_requested_at = NULL,
             result_summary = $2,
             execution_finished_at = NOW(),
             updated_at = NOW()
@@ -1390,7 +1415,7 @@ REGLAS OBLIGATORIAS:
       message: error.message,
     });
   }
-});
+}
 
 // Explicit authorization for non-independent QA. A successful result can be
 // approved only by a second, explicit human confirmation at /:id/approve.
