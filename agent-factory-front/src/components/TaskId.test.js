@@ -32,6 +32,7 @@ test("muestra ID completo, boton accesible y estilos adaptables en cada tarjeta"
     assert.match(html, /ID: task-long-id-123456789/);
     assert.match(html, /type="button"/);
     assert.match(html, /aria-label="Copiar ID de tarea task-long-id-123456789"/);
+    assert.match(html, /<button\b[^>]*\btitle="Copiar ID de tarea"/);
     assert.match(html, /role="status"/);
     for (const style of ["flex-wrap", "min-w-0", "break-all", "shrink-0", "focus-visible:outline"]) assert.ok(html.includes(style));
     const app = await readFile(new URL("../App.jsx", import.meta.url), "utf8");
