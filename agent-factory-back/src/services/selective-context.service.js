@@ -56,9 +56,9 @@ export async function collectExecutionDiff(root) {
   }
   return { root: repository, diff: diffs.join('\n'), excluded, intentionalLocks };
 }
-export async function buildSelectiveContext({ root, diff = '', excluded = [], intentionalLocks = [], limits = contextLimits(), readFile = fs.readFile }) {
+export async function buildSelectiveContext({ root, diff = '', excluded = [], intentionalLocks = [], limits = contextLimits(), readFile = fs.readFile, simple = false }) {
   const metrics = { characters: 0, includedFiles: [], excludedFiles: [...excluded], blocksReviewed: 0 };
-  const files = diff.split(/(?=^diff --git )/m).filter(Boolean);
+  const files = diff.split(/(?=^diff --git )/m).filter(section => section.trim().length > 0);
   const safe = [];
   for (const section of files) {
     const file = section.match(/^diff --git a\/(.+?) b\/(.+)\r?$/m)?.[2];
@@ -77,7 +77,19 @@ export async function buildSelectiveContext({ root, diff = '', excluded = [], in
       if (readFile === fs.readFile && !await safeRealFile(root, absolute)) throw contextError(`Contexto inseguro: ruta fuera del worktree: ${file}`, metrics);
       source = await readFile(absolute, 'utf8');
     } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
-    for (const specifier of directImports(source)) {
+    // For simple QA, only imports referenced by changed lines need extra context.
+    const section = safe.find(section => section.startsWith(`diff --git a/${file} b/${file}\n`) || section.startsWith(`diff --git a/${file} b/${file}\r\n`)) || '';
+    const changed = section
+      .split(/\r?\n/)
+      .filter((line) => /^[+-](?![+-])/.test(line))
+      .map((line) => line.slice(1))
+      .join("\n");
+    const imports = simple ? directImports(source).filter(specifier => {
+      if (directImports(changed).includes(specifier)) return true;
+      const statements = [...source.matchAll(/(?:import\s+([^;'"]*?)\s+from\s*|(?:const|let|var)\s+([^;\n]+?)\s*=\s*require\s*\()['"]([^'"]+)['"]/g)];
+      return statements.some(match => match[3] === specifier && (match[1] || match[2]).match(/[A-Za-z_$][\w$]*/g)?.some(name => !['as', 'type'].includes(name) && new RegExp(`\\b${name.replaceAll('$', '\\$')}\\b`).test(changed)));
+    }) : directImports(source);
+    for (const specifier of imports) {
       const base = path.resolve(root, path.dirname(file), specifier);
       for (const suffix of ['', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.json', '/index.js', '/index.jsx', '/index.ts', '/index.tsx']) {
         const absolute = base + suffix, relative = path.relative(root, absolute).replaceAll('\\', '/');

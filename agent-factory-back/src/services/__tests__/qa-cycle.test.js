@@ -139,3 +139,51 @@ test("non-reviewable source changes block QA approval", async () => {
   await assert.rejects(runQaValidation({ workingDirectory: "C:/proyectos/test", dependencies: f.dependencies }), error => error.qaClassification === "technical_error");
   assert.equal(f.calls(), 0);
 });
+
+for (const [taskTitle, complexity] of [['Cambiar texto', 'simple'], ['Ajustar comportamiento', 'normal'], ['Refactor backend', 'complex'], ['Auth', 'critical']]) {
+  test(`QA context policy for ${complexity} preserves diff and provider`, async () => {
+    const change = 'diff --git a/a b/a\n+complete change\n';
+    const f = fixture([], ['QA_PASS'], change);
+    let prompt;
+    f.dependencies.review = async args => { prompt = args.prompt; assert.equal(args.provider, 'claude'); assert.equal(args.sandbox, 'read-only'); return { output: 'QA_PASS' }; };
+    const result = await runQaValidation({ workingDirectory: 'C:/proyectos/test', taskTitle, provider: 'claude', dependencies: f.dependencies });
+    assert.equal(result.classification, 'passed');
+    assert.ok(prompt.includes(change));
+    assert.equal(result.contextMetrics.complexity, complexity);
+    assert.equal(result.contextMetrics.limits.total, complexity === 'simple' ? 40000 : 240000);
+  });
+}
+
+test('oversized simple diff returns inconclusive without partial provider review', async () => {
+  const change = 'diff --git a/a b/a\n+' + 'x'.repeat(45000) + '\n+LAST_LINE';
+  const f = fixture([], ['QA_PASS'], change);
+  let checked = false;
+  f.dependencies.assertUnchanged = async () => { checked = true; };
+  const result = await runQaValidation({ workingDirectory: 'C:/proyectos/test', taskTitle: 'Cambiar texto', dependencies: f.dependencies });
+  assert.equal(result.classification, 'inconclusive');
+  assert.match(result.reason, /alcance real supera una tarea simple/);
+  assert.equal(result.contextMetrics.diffCharacters, change.length);
+  assert.equal(f.calls(), 0);
+  assert.equal(checked, true);
+  assert.equal(canCorrect({ classification: result.classification, active: true, consumed: 0 }), false);
+});
+
+for (const [taskTitle, complexity] of [['Ajustar comportamiento', 'normal'], ['Refactor backend', 'complex'], ['Auth', 'critical']]) {
+  test(`${complexity} retains review of diff larger than simple budget`, async () => {
+    const change = 'diff --git a/a b/a\n+' + 'x'.repeat(45000) + '\n+LAST_LINE';
+    const f = fixture([], ['QA_PASS'], change);
+    const result = await runQaValidation({ workingDirectory: 'C:/proyectos/test', taskTitle, dependencies: f.dependencies });
+    assert.equal(result.classification, 'passed');
+    assert.equal(f.calls(), 1);
+    assert.equal(result.contextMetrics.limits.total, 240000);
+  });
+}
+
+test('simple prompt overhead also blocks before every provider call', async () => {
+  const change = 'diff --git a/a b/a\n+' + 'x'.repeat(39000);
+  const f = fixture([], ['QA_PASS'], change);
+  const result = await runQaValidation({ workingDirectory: 'C:/proyectos/test', taskTitle: 'Cambiar texto', dependencies: f.dependencies });
+  assert.equal(result.classification, 'inconclusive');
+  assert.equal(result.contextMetrics.diffCharacters, change.length);
+  assert.equal(f.calls(), 0);
+});

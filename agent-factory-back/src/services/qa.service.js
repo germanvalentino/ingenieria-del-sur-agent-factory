@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { executeAgent } from "./agent-runner.service.js";
-import { buildSpecialistGuidance } from "./specialist-profile.service.js";
+import { buildSpecialistGuidance, classifyTaskComplexity } from "./specialist-profile.service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -914,6 +914,12 @@ export async function runQaValidation({
   dependencies = {},
 }) {
   const started = Date.now();
+  const complexity = classifyTaskComplexity({ role: assignedRole, title: taskTitle, description: taskDescription });
+  const limits = contextLimits();
+  const appliedLimits = complexity === "simple"
+    ? { ...limits, total: Math.min(limits.total, 40000), file: Math.min(limits.file, 40000), related: Math.min(limits.related, 3) }
+    : limits;
+  const policyMetrics = { complexity, limits: appliedLimits };
   const validateProject = dependencies.validateProject || runProjectValidations;
   const readStatus = dependencies.readStatus || getGitStatusSnapshot;
   const changedFiles = dependencies.changedFiles || getGitChangedPaths;
@@ -1072,7 +1078,7 @@ export async function runQaValidation({
 
     return {
       status: "failed",
-      contextMetrics: { characters: 0, includedFiles: [], excludedFiles: [], blocksReviewed: 0 },
+      contextMetrics: { ...policyMetrics, characters: 0, includedFiles: [], excludedFiles: [], blocksReviewed: 0 },
       durationMs: Date.now() - started,
       classification: classifyCommandFailure(results.find(r => r.status === "failed"), await changedFiles(safeDirectory)),
       reason: commandsSummary,
@@ -1091,10 +1097,25 @@ export async function runQaValidation({
   const gitChanges =
   await readChanges(safeDirectory);
 
-  const context = await buildSelectiveContext({ root: gitChanges.root || safeDirectory, diff: gitChanges.diff, excluded: gitChanges.excluded, intentionalLocks: gitChanges.intentionalLocks });
+  const simpleInconclusive = async (metrics) => {
+    await assertUnchanged({ workingDirectory: safeDirectory, beforeStatus: initialGitStatus, beforeFingerprint: initialFingerprint });
+    const reason = "El alcance real supera una tarea simple: el contexto QA excede sus limites; no se trunco el diff ni se envio una revision parcial.";
+    return { status: "failed", classification: "inconclusive", reason, summary: `${commandsSummary}\n${reason}`, results,
+      contextMetrics: { ...metrics, ...policyMetrics, characters: 0, blocksReviewed: 0, diffCharacters: gitChanges.diff.length }, durationMs: Date.now() - started };
+  };
+  if (complexity === "simple" && gitChanges.diff.length > appliedLimits.total) return simpleInconclusive({ includedFiles: [], excludedFiles: gitChanges.excluded || [] });
+  let context;
+  try {
+    context = await buildSelectiveContext({ root: gitChanges.root || safeDirectory, diff: gitChanges.diff, excluded: gitChanges.excluded, intentionalLocks: gitChanges.intentionalLocks, limits: appliedLimits, simple: complexity === "simple" });
+  } catch (error) {
+    if (complexity === "simple" && /limite/.test(error.message)) return simpleInconclusive(error.contextMetrics);
+    error.contextMetrics = { ...error.contextMetrics, ...policyMetrics };
+    throw error;
+  }
+  Object.assign(context.metrics, policyMetrics);
   if (!context.diff.trim()) throw Object.assign(new Error('QA sin cambios textuales revisables'), { qaClassification: 'inconclusive', contextMetrics: context.metrics });
   if (context.metrics.excludedFiles.some(item => ['binary', 'non-regular'].includes(item.reason))) throw contextError('Contexto inseguro: cambios no revisables requieren revision adicional', context.metrics);
-  const chunks = qaContextChunks(context.diff);
+  const chunks = qaContextChunks(context.diff, appliedLimits);
   const contextMetrics = { ...context.metrics, characters: 0, blocksReviewed: 0 };
   const reviews = [];
   let technicalError = null;
@@ -1168,7 +1189,8 @@ RIESGOS:
   reviewPrompt = redactSecrets(reviewPrompt);
   reviewPrompts.push(reviewPrompt);
   }
-  if (reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0) > contextLimits().total) throw contextError("Contexto inseguro: prompts QA exceden limite total", contextMetrics);
+  if (reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0) > appliedLimits.total && complexity === "simple") return simpleInconclusive(contextMetrics);
+  if (reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0) > appliedLimits.total) throw contextError("Contexto inseguro: prompts QA exceden limite total", contextMetrics);
   for (const reviewPrompt of reviewPrompts) {
   if (!await shouldContinue()) break;
   contextMetrics.characters += reviewPrompt.length;

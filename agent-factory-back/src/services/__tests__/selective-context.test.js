@@ -73,3 +73,31 @@ for (const classification of ['technical_error', 'stale', 'inconclusive', 'passe
     }
   });
 }
+
+test('simple QA keeps complete diff and only dependencies used by changed lines', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'simple-context-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, 'a.js'), "import { needed } from './b.js';\nimport { unrelated } from './c.js';\n" + '// large unchanged content\n'.repeat(3000));
+  await fs.writeFile(path.join(root, 'b.js'), 'export const needed = 1;');
+  await fs.writeFile(path.join(root, 'c.js'), 'export const unrelated = 2;');
+  const change = diff('a.js', '-const label = needed("old");\n+const label = needed("new");');
+  const normal = await buildSelectiveContext({ root, diff: change });
+  const simple = await buildSelectiveContext({ root, diff: change, simple: true });
+  assert.equal(simple.diff, change);
+  assert.deepEqual(simple.metrics.includedFiles, ['a.js', 'b.js']);
+  assert.ok(simple.text.length < normal.text.length);
+  assert.ok(!simple.text.includes('large unchanged content'));
+  assert.ok(!simple.text.includes('export const unrelated'));
+});
+
+test('ignores whitespace-only separators before the first diff header', async () => {
+  const change = `\n\n${diff('a.js', '+const value = 1;')}`;
+  const result = await buildSelectiveContext({
+    root: 'C:/proyectos/test',
+    diff: change,
+    readFile: async () => '',
+  });
+
+  assert.deepEqual(result.metrics.includedFiles, ['a.js']);
+  assert.match(result.diff, /diff --git a\/a\.js b\/a\.js/);
+});
