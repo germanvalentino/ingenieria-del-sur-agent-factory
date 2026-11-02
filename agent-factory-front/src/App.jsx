@@ -1392,7 +1392,7 @@ async function correctTask(taskId) {
                   />
 
                   <h3 className="text-lg font-semibold text-white">
-                    Nueva tarea
+                    Crear nueva tarea
                   </h3>
                 </div>
 
