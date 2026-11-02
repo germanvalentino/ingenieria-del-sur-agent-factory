@@ -4,6 +4,28 @@ import { EventEmitter } from 'node:events';
 import { TaskQueue, concurrencyLimit, acquireExecutionOwner } from '../task-queue.service.js';
 
 const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate); };
+
+test('getStatus reads durable development counts without dispatching or mutating the queue', async () => {
+  let counts = { active: 2, pending: 70 };
+  let fail = false;
+  const queue = new TaskQueue({ limit: 3, db: { async query(sql) {
+    assert.match(sql, /^SELECT/);
+    assert.match(sql, /status = 'running' AND execution_requested_at IS NOT NULL/);
+    assert.match(sql, /status = 'queued' AND execution_requested_at IS NOT NULL/);
+    assert.doesNotMatch(sql, /LIMIT|UPDATE|INSERT|DELETE/);
+    if (fail) throw new Error('database unavailable');
+    return { rows: [counts] };
+  } } });
+  queue.active.add('reserved');
+  queue.run = () => assert.fail('status must not dispatch');
+  assert.deepEqual(await queue.getStatus(), { active: 2, pending: 70, limit: 3 });
+  counts = { active: 0, pending: 0 };
+  assert.deepEqual(await queue.getStatus(), { ...counts, limit: 3 });
+  fail = true;
+  await assert.rejects(queue.getStatus(), /database unavailable/);
+  assert.deepEqual([...queue.active], ['reserved']);
+  assert.equal(queue.draining, false);
+});
 function store(count = 6) {
   const tasks = Array.from({ length: count }, (_, i) => ({ id: String(i + 1), status: 'queued',
     project_id: `project-${i % 2}`, worktree_path: `isolated/${i}`, execution_requested_at: null }));

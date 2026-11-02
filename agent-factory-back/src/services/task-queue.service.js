@@ -33,6 +33,14 @@ export class TaskQueue {
     this.draining = false;
   }
 
+  async getStatus() {
+    const result = await this.db.query(`SELECT
+      COUNT(*) FILTER (WHERE status = 'running' AND execution_requested_at IS NOT NULL)::int AS active,
+      COUNT(*) FILTER (WHERE status = 'queued' AND execution_requested_at IS NOT NULL)::int AS pending
+      FROM tasks`);
+    return { active: result.rows[0].active, pending: result.rows[0].pending, limit: this.limit };
+  }
+
   async enqueue(id) {
     // One persistent request per task. Repeated clicks preserve FIFO order.
     const result = await this.db.query(`UPDATE tasks

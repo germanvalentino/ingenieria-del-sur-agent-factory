@@ -42,6 +42,25 @@ al omitir el denominador cuando no existe executionQueue.
 
 ## Recuperacion y rollback
 
+### Consulta de estado
+
+`GET /api/health/queue` devuelve HTTP 200 con JSON, por ejemplo
+`{ "active": 2, "pending": 70, "limit": 3 }`.
+Reutiliza `taskQueue.getStatus()` sin iniciar ni modificar ejecuciones.
+`active` cuenta tareas `running` con solicitud de ejecucion; `pending` cuenta
+tareas `queued` con solicitud de ejecucion. Son conteos globales de la base,
+sin el limite de tarjetas del dashboard; excluyen QA y tareas sin solicitud.
+`limit` es el limite configurado del servicio. Cada consulta lee el estado
+persistido actual, que puede cambiar inmediatamente por ejecuciones concurrentes.
+La ruta conserva el montaje de health existente, actualmente sin middleware de
+autenticacion propio; cualquier proteccion externa de `/api/health` debe cubrir
+tambien esta subruta.
+Si falla la consulta, devuelve HTTP 500 con
+`{ "status": "error", "message": "No se pudo consultar la cola de ejecucion" }`,
+sin detalles internos. No cambia datos ni requiere migraciones: ante un fallo no
+hay escrituras que revertir y se puede volver a consultar. Para retirar este
+endpoint basta revertir sus cambios de codigo, sin ejecutar rollback SQL.
+
 Las solicitudes que aun esperan sobreviven al reinicio y arrancan automaticamente.
 Se mantiene la recuperacion existente de ejecuciones interrumpidas: quedan fallidas
 para reintento humano. No se relanzan automaticamente procesos que podrian haber
