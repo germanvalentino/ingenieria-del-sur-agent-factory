@@ -1421,12 +1421,12 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
     }
     const { developer, reviewer } = await getCrossQaProvider(task.id);
     const lastQa = await pool.query(
-      `SELECT provider, error_message FROM task_executions
+      `SELECT provider, status, error_message FROM task_executions
        WHERE task_id = $1 AND execution_type = 'qa'
        ORDER BY started_at DESC, id DESC LIMIT 1`, [task.id]
     );
     const failure = lastQa.rows[0];
-    if (!failure || failure.provider !== reviewer ||
+    if (!failure || failure.status !== "failed" || failure.provider !== reviewer ||
         !getProviderFailure(new Error(failure.error_message || "")).isProviderFailure) {
       return res.status(409).json({ message: "No hay un bloqueo de proveedor QA cruzado que habilite esta excepcion." });
     }

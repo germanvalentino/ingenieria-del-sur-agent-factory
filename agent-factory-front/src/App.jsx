@@ -1674,9 +1674,7 @@ async function correctTask(taskId) {
                               </pre>
                             </details>
                           )}
-                          {task.status === "review" && task.qa_status === "pending" &&
-                            /usage limit|rate limit|quota|cuota|tokens|credits|límite de uso/i.test(task.qa_summary || "") &&
-                            !/QA ALTERNATIVO AUTORIZADO/i.test(task.qa_summary || "") && (
+                          {task.qa_fallback_eligible === true && (
                               <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
                                 <p className="text-sm font-semibold text-amber-200">QA cruzado bloqueado: el revisor no tiene cuota disponible.</p>
                                 <p className="mt-2 text-xs text-amber-100">Podés esperar y reintentar el QA cruzado, o autorizar una revisión provisional con el proveedor que desarrolló. Esta última requiere confirmación humana adicional antes de integrar a main.</p>

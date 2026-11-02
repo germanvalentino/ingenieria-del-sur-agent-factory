@@ -52,7 +52,7 @@ for (const releaseFails of [false, true]) {
       calls++;
       if (calls === 1) return { rows: [{ id: 12, status: 'review', qa_status: 'pending', agent_working_path: 'unused', worktree_path: 'unused', auto_correction_active: false }] };
       if (calls === 2) return { rows: [{ provider: 'codex' }] };
-      if (calls === 3) return { rows: [{ provider: 'claude', error_message: 'ETIMEDOUT' }] };
+      if (calls === 3) return { rows: [{ provider: 'claude', status: 'failed', error_message: 'ETIMEDOUT' }] };
       if (calls === 4) return { rowCount: 1, rows: [{ id: 12 }] };
       if (calls === 5) throw failure;
       if (sql.includes("SET qa_status = 'pending'")) {
