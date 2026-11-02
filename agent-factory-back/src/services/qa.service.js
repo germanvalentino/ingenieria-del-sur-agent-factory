@@ -1245,7 +1245,10 @@ INSTRUCCIONES:
 - Buscá errores lógicos, regresiones, problemas de seguridad y criterios incumplidos.
 - ${validationsMessage}
 - No rechaces por preferencias estéticas menores.
-- Si encontrás un problema real, emití QA_FAIL.
+- Emití QA_FAIL únicamente ante un defecto bloqueante, concreto y verificable en el diff que incumpla un criterio de aceptación, rompa el funcionamiento o introduzca un riesgo de seguridad real.
+- Para cada hallazgo bloqueante indicá archivo o función afectada, escenario de reproducción y consecuencia observable.
+- No uses QA_FAIL por riesgos hipotéticos, mejoras opcionales, refactors, cobertura de tests no exigida, diferencias de estilo o dudas sin evidencia. Esos puntos pueden quedar en RIESGOS con QA_PASS.
+- No vuelvas a exigir correcciones ya resueltas ni amplíes el alcance de la tarea con requisitos nuevos.
 - Si no encontrás problemas bloqueantes, emití QA_PASS.
 
 STATUS DE GIT:

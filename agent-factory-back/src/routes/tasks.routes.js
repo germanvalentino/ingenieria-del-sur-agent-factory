@@ -554,8 +554,8 @@ async function runCorrectionAttempt({
         capability: "correction",
         sandbox: "workspace-write",
         model: task.model,
-        runWithProvider: (provider) =>
-          executeAgent({
+        runWithProvider: async (provider) => {
+          const result = await executeAgent({
             provider,
             workingDirectory:
               task.agent_working_path,
@@ -565,28 +565,39 @@ async function runCorrectionAttempt({
               provider === taskProvider
                 ? task.model
                 : null,
-          }),
+          });
+          const gitStatus = await getWorktreeStatus(
+            task.worktree_path
+          );
+
+          return {
+            ...result,
+            correctionGitStatus: gitStatus,
+            correctionLeftChanges:
+              Boolean(gitStatus) &&
+              gitStatus !== statusBeforeCorrection,
+          };
+        },
+        getStatus: (result) =>
+          result.correctionLeftChanges
+            ? "passed"
+            : "failed",
+        getMetadata: (result) => ({
+          ...executionMetadata(result),
+          errorMessage: result.correctionLeftChanges
+            ? null
+            : "La correccion automatica finalizo sin dejar cambios en el worktree.",
+        }),
       });
     const correctionResult =
       providerAttempt.result;
 
-    const gitStatus = await getWorktreeStatus(
-      task.worktree_path
-    );
+    const gitStatus =
+      correctionResult.correctionGitStatus;
     const leftChanges =
-      Boolean(gitStatus) &&
-      gitStatus !== statusBeforeCorrection;
+      correctionResult.correctionLeftChanges;
     const noChangesErrorMessage =
       "La correccion automatica finalizo sin dejar cambios en el worktree.";
-
-    if (!leftChanges) {
-      await finishTaskExecution({
-        executionId: providerAttempt.executionId,
-        status: "failed",
-        ...executionMetadata(correctionResult),
-        errorMessage: noChangesErrorMessage,
-      });
-    }
 
     const correctionSummary = [
       "",
@@ -610,12 +621,12 @@ async function runCorrectionAttempt({
         `
           UPDATE tasks
           SET status = 'review',
-              qa_status = 'pending',
+              qa_status = $4,
               correction_feedback = $2,
-              correction_count = correction_count + 1,
-              correction_attempts = correction_attempts + 1,
+              correction_count = correction_count + $5,
+              correction_attempts = correction_attempts + $5,
               auto_correction_finished_count =
-                auto_correction_finished_count + 1,
+                auto_correction_finished_count + $5,
               execution_finished_at = NOW(),
               result_summary =
                 COALESCE(result_summary, '')
@@ -628,6 +639,8 @@ async function runCorrectionAttempt({
           task.id,
           qaSummary.slice(-15000),
           correctionSummary.slice(-15000),
+          leftChanges ? "pending" : "failed",
+          leftChanges ? 1 : 0,
         ]
       );
 
@@ -1640,6 +1653,35 @@ router.post(
         finalTask = currentTask;
         previousExecutionLeftChanges =
           correctionAttemptResult.leftChanges;
+
+        if (!previousExecutionLeftChanges) {
+          const noChangesSummary = [
+            currentTask.qa_summary,
+            "",
+            "CICLO AUTOMATICO DETENIDO:",
+            "La correccion no dejo cambios. No se consumio un intento ni se ejecuto otro QA.",
+          ].join("\n");
+
+          const noChangesResult =
+            await pool.query(
+              `
+                UPDATE tasks
+                SET status = 'review',
+                    qa_status = 'failed',
+                    qa_summary = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *
+              `,
+              [
+                currentTask.id,
+                noChangesSummary.slice(-15000),
+              ]
+            );
+
+          finalTask = noChangesResult.rows[0];
+          break;
+        }
       }
 
       if (

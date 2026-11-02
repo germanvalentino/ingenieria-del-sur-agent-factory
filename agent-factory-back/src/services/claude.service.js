@@ -734,14 +734,17 @@ export async function executeClaude({
       sandbox
     );
 
-  // Node.js rechaza argumentos con bytes NUL; normalizamos solo el prompt.
+  // Node.js rechaza argumentos con bytes NUL. También evitamos pasar prompts
+  // grandes por argv, porque Windows tiene un límite mucho menor que stdin.
   if (typeof prompt !== "string") {
     throw new TypeError("El prompt de Claude debe ser un string");
   }
-  const safePrompt = prompt.replace(/\u0000/g, "");
+  const safePrompt = prompt.replace(
+    /\u0000/g,
+    "[BYTE_NUL_OMITIDO]"
+  );
   const claudeArgs = [
     "-p",
-    safePrompt,
     "--model",
     model,
     "--output-format",
@@ -788,7 +791,7 @@ export async function executeClaude({
         {
           cwd: resolvedDirectory,
           env: claudeEnvironment(),
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["pipe", "pipe", "pipe"],
         }
       );
     } catch (error) {
@@ -845,6 +848,20 @@ export async function executeClaude({
         )
       );
     });
+
+    child.stdin.on("error", (error) => {
+      if (settled || error.code === "EPIPE") {
+        return;
+      }
+
+      fail(
+        createExecutionError(
+          `No se pudo enviar el prompt a Claude: ${error.message}`
+        )
+      );
+    });
+
+    child.stdin.end(safePrompt);
 
     const timeout = setTimeout(() => {
       timedOut = true;
