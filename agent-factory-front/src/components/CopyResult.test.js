@@ -1,10 +1,86 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createElement } from "react";
+import { act, createElement, StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { JSDOM } from "jsdom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import { readFile } from "node:fs/promises";
 import { copyResult } from "./resultClipboard.js";
+
+test("oculta Copiado a los 2 segundos y limpia efectos al reintentar y desmontar", async (t) => {
+  const server = await createServer({ configFile: false, server: { middlewareMode: true } });
+  const dom = new JSDOM('<div id="root"></div>');
+  const globals = ["window", "document", "navigator", "IS_REACT_ACT_ENVIRONMENT"];
+  const originals = globals.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
+  let root;
+  try {
+    const { default: CopyResult } = await server.ssrLoadModule("/src/components/CopyResult.jsx");
+    let write = async () => {};
+    for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document,
+      navigator: { clipboard: { writeText: (text) => write(text) } }, IS_REACT_ACT_ENVIRONMENT: true })) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+    }
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const container = document.getElementById("root");
+    const mount = async () => {
+      root = createRoot(container);
+      await act(async () => root.render(createElement(StrictMode, null,
+        createElement(CopyResult, { text: "Texto completo", label: "resultado" }))));
+    };
+    const click = () => act(async () => container.querySelector("button").click());
+    const status = () => container.querySelector('[role="status"]').textContent;
+    await mount();
+    let received;
+    write = async (text) => { received = text; };
+    await click();
+    assert.equal(received, "Texto completo");
+    assert.equal(status(), "Copiado");
+    await act(async () => t.mock.timers.tick(1999));
+    assert.equal(status(), "Copiado");
+    await act(async () => t.mock.timers.tick(1));
+    assert.equal(status(), "");
+
+    await click();
+    await act(async () => t.mock.timers.tick(1000));
+    await click();
+    await act(async () => t.mock.timers.tick(1000));
+    assert.equal(status(), "Copiado");
+    await act(async () => t.mock.timers.tick(1000));
+    assert.equal(status(), "");
+
+    await click();
+    write = async () => { throw new Error("denied"); };
+    await click();
+    await act(async () => t.mock.timers.tick(2000));
+    assert.match(status(), /No se pudo copiar/);
+    let finish;
+    write = () => new Promise((resolve) => { finish = resolve; });
+    await click();
+    assert.equal(container.querySelector("button").disabled, true);
+    await act(async () => root.unmount());
+    const schedule = t.mock.method(globalThis, "setTimeout");
+    await act(async () => finish());
+    assert.equal(schedule.mock.callCount(), 0);
+
+    await mount();
+    write = async () => {};
+    await click();
+    const clear = t.mock.method(globalThis, "clearTimeout");
+    await act(async () => root.unmount());
+    assert.equal(clear.mock.callCount(), 1);
+    await act(async () => t.mock.timers.tick(2000));
+  } finally {
+    t.mock.restoreAll();
+    t.mock.timers.reset();
+    await server.close();
+    dom.window.close();
+    globals.forEach((key, index) => {
+      if (originals[index]) Object.defineProperty(globalThis, key, originals[index]);
+      else delete globalThis[key];
+    });
+  }
+});
 
 test("copia el resultado completo con saltos y confirma al finalizar", async () => {
   const text = `  Desarrollo\n\n${"resultado largo ".repeat(1000)}\r\nFin  `;

@@ -1,17 +1,33 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { copyResult } from "./resultClipboard.js";
 
 export default function CopyResult({ text, label }) {
   const [message, setMessage] = useState("");
   const [copying, setCopying] = useState(false);
+  const mounted = useRef(false);
+  const timeout = useRef(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(timeout.current);
+    };
+  }, []);
 
   async function handleCopy(event) {
     event.preventDefault();
     event.stopPropagation();
+    clearTimeout(timeout.current);
     setMessage("");
     setCopying(true);
-    setMessage(await copyResult(text));
+    const result = await copyResult(text);
+    if (!mounted.current) return;
+    setMessage(result);
     setCopying(false);
+    if (result === "Copiado") {
+      timeout.current = setTimeout(() => setMessage(""), 2000);
+    }
   }
 
   return (
