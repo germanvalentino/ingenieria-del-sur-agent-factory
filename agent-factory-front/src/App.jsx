@@ -23,6 +23,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import ProjectManager from "./components/ProjectManager";
+import MetricCard from "./components/MetricCard";
 import SpecificationAssistant from "./components/SpecificationAssistant";
 
 const API_URL =
@@ -626,29 +627,6 @@ function createDashboardStore() {
 }
 
 const dashboardStore = createDashboardStore();
-
-function MetricCard({
-  title,
-  value,
-  icon: Icon,
-  color,
-}) {
-  return (
-    <article className="rounded-2xl border border-white/10 bg-white/5 p-5">
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-slate-400">
-          {title}
-        </span>
-
-        <Icon className={color} size={20} />
-      </div>
-
-      <strong className="mt-3 block text-3xl text-white">
-        {value}
-      </strong>
-    </article>
-  );
-}
 
 function App() {
   const [activeTab, setActiveTab] =
@@ -1370,6 +1348,7 @@ async function correctTask(taskId) {
                 value={
                   dashboard.metrics.runningTasks
                 }
+                execution
                 icon={Bot}
                 color="text-violet-400"
               />
