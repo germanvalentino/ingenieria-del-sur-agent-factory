@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { includeContextFile, buildSelectiveContext, contextLimits, qaContextChunks, blockingQa, collectExecutionDiff } from '../selective-context.service.js';
+import { includeContextFile, buildSelectiveContext, contextLimits, qaContextChunks, validateQaPromptBudget, blockingQa, collectExecutionDiff } from '../selective-context.service.js';
 const diff = (name, body = '+export const value = 2;') => `diff --git a/${name} b/${name}\n--- a/${name}\n+++ b/${name}\n${body}\n`;
 test('exclude generated, binary extensions, env variants, secrets, traversal and temporary files', () => {
   for (const file of ['node_modules/a.js', 'front/dist/a.js', 'build/a', 'coverage/a', '.git/config', '.env', 'x/.env.production', '.envrc', 'secret.json', 'credentials.json', 'logs/a', 'a.log', 'tmp/a', 'a.tmp', 'a.png', 'a.pem', '../a', 'package-lock.json']) assert.equal(includeContextFile(file), false, file);
@@ -126,4 +126,18 @@ test('collectExecutionDiff from a nested frontend directory includes root-relati
   assert.match(result.diff, /\+after/);
   const context = await buildSelectiveContext(result);
   assert.deepEqual(context.metrics.includedFiles, ['agent-factory-front/src/App.jsx']);
+});
+
+test('QA fullstack allows independent prompts whose sum exceeds one-call budget', () => {
+  const limits = { ...contextLimits(), total: 100 };
+  const prompts = ['a'.repeat(80), 'b'.repeat(80)];
+  assert.deepEqual(validateQaPromptBudget(prompts, limits), { promptCount: 2, totalCharacters: 160 });
+});
+
+test('QA rejects an oversized individual prompt before any provider review', () => {
+  const limits = { ...contextLimits(), total: 100 };
+  assert.throws(() => validateQaPromptBudget(['ok', 'x'.repeat(101)], limits), error =>
+    error.qaClassification === 'technical_error' &&
+    error.contextMetrics.blockedGroup === 2 &&
+    error.contextMetrics.blockedReason === 'qa_prompt_limit');
 });

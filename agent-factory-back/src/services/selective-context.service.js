@@ -102,7 +102,31 @@ export async function buildSelectiveContext({ root, diff = '', excluded = [], in
         let bytes;
         try { const stat = await fs.lstat(absolute); if (stat.isDirectory()) continue; if (!stat.isFile() || stat.isSymbolicLink() || !await safeRealFile(root, absolute)) throw contextError(`Contexto inseguro: dependencia fuera del worktree: ${relative}`, metrics); bytes = await readFile(absolute); } catch (e) { if (['ENOENT', 'EISDIR'].includes(e.code)) continue; throw e; }
         if (!isText(Buffer.from(bytes))) { metrics.excludedFiles.push({ file: relative, reason: 'binary dependency' }); break; }
-        if (dependencies.length >= limits.related || bytes.length > limits.file) throw contextError(`Contexto inseguro: dependencia requerida excede limites: ${relative}`, metrics);
+        if (dependencies.length >= limits.related) {
+  throw contextError(
+    `Contexto inseguro: máximo de dependencias alcanzado (${limits.related}). Siguiente archivo: ${relative}`,
+    {
+      ...metrics,
+      dependencyCount: dependencies.length,
+      dependencyLimit: limits.related,
+      blockedFile: relative,
+      blockedReason: 'related_files_limit'
+    }
+  );
+}
+
+if (bytes.length > limits.file) {
+  throw contextError(
+    `Contexto inseguro: dependencia supera tamaño máximo (${bytes.length} > ${limits.file} bytes): ${relative}`,
+    {
+      ...metrics,
+      dependencyCount: dependencies.length,
+      fileLimit: limits.file,
+      blockedFile: relative,
+      blockedReason: 'file_size_limit'
+    }
+  );
+}
         dependencyOwners[relative] = [file];
         dependencies.push(`ARCHIVO ${relative}:\n${bytes.toString()}`); metrics.includedFiles.push(relative); break;
       }
@@ -113,6 +137,22 @@ export async function buildSelectiveContext({ root, diff = '', excluded = [], in
   metrics.characters = text.length;
   return { text, diff: safe.join('\n'), dependencies: redactSecrets(dependencies.join('\n\n')), dependencyOwners, dependencyFiles: dependencies.map(text => redactSecrets(text)), metrics };
 }
+/** Verify every independent QA request without silently truncating review coverage. */
+export function validateQaPromptBudget(prompts, limits = contextLimits(), metrics = {}) {
+  for (let index = 0; index < prompts.length; index++) {
+    if (prompts[index].length > limits.total) {
+      throw contextError(`Contexto inseguro: prompt QA del grupo ${index + 1} excede limite por llamada (${prompts[index].length} > ${limits.total})`, {
+        ...metrics,
+        blockedGroup: index + 1,
+        blockedReason: 'qa_prompt_limit',
+        promptCharacters: prompts[index].length,
+        promptLimit: limits.total,
+      });
+    }
+  }
+  return { promptCount: prompts.length, totalCharacters: prompts.reduce((sum, prompt) => sum + prompt.length, 0) };
+}
+
 export function qaContextChunks(diff, limits = contextLimits()) {
   // Keep frontend and backend in separate groups, preserving complete coverage.
   const files = diff.split(/(?=^diff --git )/m).filter(Boolean);

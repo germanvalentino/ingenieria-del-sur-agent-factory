@@ -1,5 +1,5 @@
 import { executeGit } from "./git-command.service.js";
-import { collectExecutionDiff, buildSelectiveContext, qaContextChunks, includeContextFile, contextLimits, contextError } from "./selective-context.service.js";
+import { collectExecutionDiff, buildSelectiveContext, qaContextChunks, includeContextFile, contextLimits, contextError, validateQaPromptBudget } from "./selective-context.service.js";
 import { redactSecrets } from "./secret-redaction.service.js";
 import { classifyVerdict, classifyCommandFailure, isText, reviewChunks, worktreeFingerprint } from "./qa-cycle.service.js";
 import {
@@ -1152,7 +1152,7 @@ Si las observaciones humanas posteriores contradicen el requerimiento original, 
 
 INSTRUCCIONES:
 - Revisá exclusivamente el STATUS y DIFF entregados dentro de este mensaje.
-- Este mensaje contiene un grupo de archivos o un segmento de un diff grande. Si falta contexto necesario, no emitas QA_PASS: responde INCONCLUSIVE y explica el impedimento.
+- Este mensaje contiene un grupo de archivos o un segmento de un diff grande. Si falta una dependencia realmente necesaria para evaluar ESTE grupo, responde INCONCLUSIVE y explica el impedimento. No exijas archivos asignados a otros grupos solo por aparecer en STATUS DE GIT.
 - No intentes ejecutar git diff.
 - Lee archivos adicionales solamente si son dependencias directas del cambio. No recorras el repositorio ni releas contenido incluido. Nunca leas .env, secretos, binarios, logs ni archivos generados.
 - No modifiques archivos.
@@ -1165,6 +1165,26 @@ INSTRUCCIONES:
 - No uses QA_FAIL por riesgos hipotéticos, mejoras opcionales, refactors, cobertura de tests no exigida, diferencias de estilo o dudas sin evidencia. Esos puntos pueden quedar en RIESGOS con QA_PASS.
 - No vuelvas a exigir correcciones ya resueltas ni amplíes el alcance de la tarea con requisitos nuevos.
 - Si no encontrás problemas bloqueantes, emití QA_PASS.
+
+ALCANCE DE ESTA REVISION:
+Esta tarea puede estar dividida en varios grupos de QA.
+Revisa exclusivamente el diff incluido en este mensaje y sus
+dependencias directas.
+
+El STATUS DE GIT representa la tarea completa y puede incluir
+archivos revisados por otros grupos.
+
+No declares INCONCLUSIVE ni QA_FAIL solamente porque otros
+archivos del STATUS DE GIT no aparecen en este grupo.
+
+Evalua todos los criterios de aceptacion aplicables a los
+archivos de este grupo.
+
+Si detectas un defecto concreto en la interfaz o contrato
+entre componentes, reportalo.
+
+Si no hay defectos bloqueantes verificables en este grupo,
+emiti QA_PASS. No afirmes haber revisado archivos ausentes.
 
 STATUS DE GIT:
 ${gitChanges.status || "Ver diff"}
@@ -1189,8 +1209,17 @@ RIESGOS:
   reviewPrompt = redactSecrets(reviewPrompt);
   reviewPrompts.push(reviewPrompt);
   }
-  if (reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0) > appliedLimits.total && complexity === "simple") return simpleInconclusive(contextMetrics);
-  if (reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0) > appliedLimits.total) throw contextError("Contexto inseguro: prompts QA exceden limite total", contextMetrics);
+  // Cada grupo se envía en una llamada independiente. El presupuesto de contexto
+  // protege CADA llamada; sumar prompts independientes rechaza tareas fullstack
+  // válidas sin mejorar la seguridad. No se trunca ni se omite ningún grupo.
+  try {
+    validateQaPromptBudget(reviewPrompts, appliedLimits, contextMetrics);
+  } catch (error) {
+    if (complexity === "simple") return simpleInconclusive(error.contextMetrics || contextMetrics);
+    throw error;
+  }
+  contextMetrics.promptCount = reviewPrompts.length;
+  contextMetrics.totalPromptCharacters = reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0);
   for (const reviewPrompt of reviewPrompts) {
   if (!await shouldContinue()) break;
   contextMetrics.characters += reviewPrompt.length;
