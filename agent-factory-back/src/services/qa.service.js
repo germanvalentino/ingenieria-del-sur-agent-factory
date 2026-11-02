@@ -9,6 +9,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { executeAgent } from "./agent-runner.service.js";
+import { buildSpecialistGuidance } from "./specialist-profile.service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -905,6 +906,7 @@ export async function runQaValidation({
   projectDirectories = null,
   baseBranch = "main",
   provider = "codex",
+  assignedRole = "qa",
   taskTitle,
   taskDescription,
   correctionFeedback,
@@ -926,6 +928,12 @@ export async function runQaValidation({
     );
 
   const initialFingerprint = await fingerprint(safeDirectory);
+  const qaGuidance = buildSpecialistGuidance({
+    role: assignedRole,
+    title: taskTitle,
+    description: taskDescription,
+    phase: "qa",
+  });
   let results = [];
   let usingNodeSyntaxCheck = false;
   let commandsSummary;
@@ -1115,6 +1123,8 @@ ${
   correctionFeedback ||
   "No existen observaciones posteriores."
 }
+
+${qaGuidance}
 
 IMPORTANTE:
 Si las observaciones humanas posteriores contradicen el requerimiento original, las observaciones posteriores tienen prioridad porque representan la decisión más reciente del revisor.

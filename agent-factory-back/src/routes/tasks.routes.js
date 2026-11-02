@@ -16,6 +16,7 @@ import {
   getProviderFailure,
 } from "../services/agent-runner.service.js";
 import { runQaValidation } from "../services/qa.service.js";
+import { buildSpecialistGuidance } from "../services/specialist-profile.service.js";
 
 import {
   finalizeTaskWorktree,
@@ -356,6 +357,12 @@ function buildCorrectionPrompt({
       agentWorkingDirectory:
         task.agent_working_path,
     });
+  const specialistGuidance = buildSpecialistGuidance({
+    role: task.assigned_role,
+    title: task.title,
+    description: task.description,
+    phase: "correction",
+  });
 
   return `
 Sos el ${agent.name} de IngenierÃ­a del Sur.
@@ -376,6 +383,8 @@ ${
 
 RESULTADO COMPLETO DEL ÃšLTIMO QA:
 ${blockingQa(qaSummary, task.qa_details?.classification) || "No hay hallazgos bloqueantes QA."}
+
+${specialistGuidance}
 
 INSTRUCCIONES:
 - RevisÃ¡ los cambios existentes antes de modificar.
@@ -475,6 +484,7 @@ async function runQaAttempt({
             baseBranch:
               task.base_branch || "main",
             provider,
+            assignedRole: task.assigned_role,
             taskTitle: task.title,
             taskDescription:
               task.description,
@@ -1170,6 +1180,13 @@ WHERE id = $1
       [agent.id]
     );
 
+    const specialistGuidance = buildSpecialistGuidance({
+      role: task.assigned_role,
+      title: task.title,
+      description: task.description,
+      phase: "development",
+    });
+
     const prompt = `
 Sos el ${agent.name} de Ingeniería del Sur.
 
@@ -1195,6 +1212,8 @@ CONTEXTO GIT:
 - La carpeta principal del usuario no debe modificarse.
 
 ${allowedPathsPrompt}
+
+${specialistGuidance}
 
 REGLAS OBLIGATORIAS:
 - Trabajá solamente dentro del directorio asignado.
@@ -1407,6 +1426,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
         projectDirectories: getQaProjectDirectories(task),
         baseBranch: task.base_branch || 'main',
         provider,
+        assignedRole: task.assigned_role,
         taskTitle: task.title,
         taskDescription: task.description,
         correctionFeedback: task.correction_feedback,
