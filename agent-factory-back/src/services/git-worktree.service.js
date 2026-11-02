@@ -1,3 +1,4 @@
+import { executeGit } from "./git-command.service.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -12,8 +13,7 @@ const WORKTREES_ROOT = path.resolve(
 
 async function runGit(args, cwd) {
   try {
-    const result = await execFileAsync(
-      "git",
+    const result = await executeGit(
       args,
       {
         cwd,

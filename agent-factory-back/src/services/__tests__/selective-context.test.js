@@ -1,9 +1,10 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { includeContextFile, buildSelectiveContext, contextLimits, qaContextChunks, blockingQa } from '../selective-context.service.js';
+import { execFileSync } from 'node:child_process';
+import { includeContextFile, buildSelectiveContext, contextLimits, qaContextChunks, blockingQa, collectExecutionDiff } from '../selective-context.service.js';
 const diff = (name, body = '+export const value = 2;') => `diff --git a/${name} b/${name}\n--- a/${name}\n+++ b/${name}\n${body}\n`;
 test('exclude generated, binary extensions, env variants, secrets, traversal and temporary files', () => {
   for (const file of ['node_modules/a.js', 'front/dist/a.js', 'build/a', 'coverage/a', '.git/config', '.env', 'x/.env.production', '.envrc', 'secret.json', 'credentials.json', 'logs/a', 'a.log', 'tmp/a', 'a.tmp', 'a.png', 'a.pem', '../a', 'package-lock.json']) assert.equal(includeContextFile(file), false, file);
@@ -100,4 +101,29 @@ test('ignores whitespace-only separators before the first diff header', async ()
 
   assert.deepEqual(result.metrics.includedFiles, ['a.js']);
   assert.match(result.diff, /diff --git a\/a\.js b\/a\.js/);
+});
+
+
+test('collectExecutionDiff from a nested frontend directory includes root-relative changed files', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-nested-worktree-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+  git('init', '-q');
+  git('config', 'user.name', 'QA Test');
+  git('config', 'user.email', 'qa@example.test');
+  const nested = path.join(root, 'agent-factory-front');
+  await fs.mkdir(path.join(nested, 'src'), { recursive: true });
+  await fs.writeFile(path.join(nested, 'src', 'App.jsx'), 'before\n');
+  git('add', '.');
+  git('commit', '-qm', 'baseline');
+  await fs.writeFile(path.join(nested, 'src', 'App.jsx'), 'after\n');
+  const result = await collectExecutionDiff(nested);
+  assert.equal(
+    (await fs.realpath(result.root)).replaceAll('\\', '/').toLowerCase(),
+    (await fs.realpath(root)).replaceAll('\\', '/').toLowerCase()
+  );
+  assert.match(result.diff, /diff --git a\/agent-factory-front\/src\/App\.jsx b\/agent-factory-front\/src\/App\.jsx/);
+  assert.match(result.diff, /\+after/);
+  const context = await buildSelectiveContext(result);
+  assert.deepEqual(context.metrics.includedFiles, ['agent-factory-front/src/App.jsx']);
 });

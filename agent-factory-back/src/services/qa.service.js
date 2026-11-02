@@ -1,3 +1,4 @@
+import { executeGit } from "./git-command.service.js";
 import { collectExecutionDiff, buildSelectiveContext, qaContextChunks, includeContextFile, contextLimits, contextError } from "./selective-context.service.js";
 import { redactSecrets } from "./secret-redaction.service.js";
 import { classifyVerdict, classifyCommandFailure, isText, reviewChunks, worktreeFingerprint } from "./qa-cycle.service.js";
@@ -383,8 +384,7 @@ function isPlaceholderTest(scriptValue) {
 }
 
 async function runGit(args, cwd) {
-  const result = await execFileAsync(
-    "git",
+  const result = await executeGit(
     args,
     {
       cwd,

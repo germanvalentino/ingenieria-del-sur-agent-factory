@@ -1,10 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { isText, reviewChunks } from './qa-cycle.service.js';
 import { redactSecrets } from './secret-redaction.service.js';
-const exec = promisify(execFile);
+import { executeGit } from './git-command.service.js';
 export function contextLimits(env = process.env) {
   const positive = (key, fallback) => /^\d+$/.test(env[key] || '') && Number.isSafeInteger(Number(env[key])) && Number(env[key]) > 0 ? Number(env[key]) : fallback;
   return { file: positive('AGENT_CONTEXT_MAX_FILE_CHARS', 180000), total: positive('AGENT_CONTEXT_MAX_CHARS', 240000), related: positive('AGENT_CONTEXT_MAX_RELATED_FILES', 12), blocks: positive('AGENT_CONTEXT_MAX_QA_BLOCKS', 8) };
@@ -33,10 +31,13 @@ export function directImports(source) {
   return [...new Set([...source.matchAll(/(?:from\s*|import\s*\(|require\s*\(|import\s*)['"](\.[^'"]+)['"]/g)].map(m => m[1]))];
 }
 export async function collectExecutionDiff(root) {
-  const git = async args => (await exec('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, windowsHide: true, maxBuffer: 20 * 1024 * 1024 })).stdout;
+  const git = async args => (await executeGit(['-c', 'core.quotePath=false', ...args], { cwd: root, windowsHide: true, maxBuffer: 20 * 1024 * 1024 })).stdout;
   const repository = (await git(['rev-parse', '--show-toplevel'])).trim();
-  const tracked = (await git(['diff', 'HEAD', '--name-only', '-z'])).split('\0').filter(Boolean);
-  const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
+  // Git emits paths relative to cwd. Always collect from the worktree root so
+  // file names match the absolute paths used for reading and diff generation.
+  const gitFromRoot = async args => (await executeGit(['-c', 'core.quotePath=false', ...args], { cwd: repository, windowsHide: true, maxBuffer: 20 * 1024 * 1024 })).stdout;
+  const tracked = (await gitFromRoot(['diff', 'HEAD', '--name-only', '-z'])).split('\0').filter(Boolean);
+  const untracked = (await gitFromRoot(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
   const excluded = [], diffs = [];
   const intentionalLocks = tracked.filter(file => file.endsWith('package-lock.json') && tracked.includes(file.replace('package-lock.json', 'package.json')));
   for (const file of [...new Set([...tracked, ...untracked])]) {
@@ -52,7 +53,7 @@ export async function collectExecutionDiff(root) {
       content = bytes.toString('utf8');
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (untracked.includes(file)) diffs.push(`diff --git a/${file} b/${file}\n--- /dev/null\n+++ b/${file}\n${content.split('\n').map(line => '+' + line).join('\n')}`);
-    else diffs.push(await git(['diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--unified=3', '--', file]));
+    else diffs.push(await gitFromRoot(['diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--unified=3', '--', file]));
   }
   return { root: repository, diff: diffs.join('\n'), excluded, intentionalLocks };
 }
