@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import ProjectManager from "./components/ProjectManager";
 import MetricCard from "./components/MetricCard";
+import TaskId from "./components/TaskId";
 import SpecificationAssistant from "./components/SpecificationAssistant";
 
 const API_URL =
@@ -1615,6 +1616,8 @@ async function correctTask(taskId) {
                           <h4 className="mt-3 break-words font-medium text-white">
                             {task.title}
                           </h4>
+
+                          <TaskId id={task.id} />
 
                           <p className="mt-1 break-words text-sm text-slate-400">
                             {task.description}
