@@ -25,6 +25,7 @@ import {
 import ProjectManager from "./components/ProjectManager";
 import MetricCard from "./components/MetricCard";
 import TaskId from "./components/TaskId";
+import CopyResult from "./components/CopyResult";
 import SpecificationAssistant from "./components/SpecificationAssistant";
 
 const API_URL =
@@ -1654,6 +1655,7 @@ async function correctTask(taskId) {
                             <details className="mt-4 min-w-0 rounded-lg border border-white/10 bg-black/20 p-3">
                               <summary className="cursor-pointer text-xs font-medium text-sky-300">
                                 Ver resultado del agente
+                                <CopyResult key={task.result_summary} text={task.result_summary} label="resultado de desarrollo" />
                               </summary>
 
                               <pre className="mt-3 max-h-80 max-w-full overflow-y-auto whitespace-pre-wrap break-words text-xs text-slate-400">
@@ -1704,6 +1706,7 @@ async function correctTask(taskId) {
                                 {task.qa_status === "pending" && /QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO/i.test(task.qa_summary || "")
                                   ? "provisional · QA cruzado pendiente"
                                   : task.qa_status}
+                                <CopyResult key={task.qa_summary} text={task.qa_summary} label="resultado QA" />
                               </summary>
 
                               <pre className="mt-3 max-h-80 max-w-full overflow-y-auto whitespace-pre-wrap break-words text-xs text-slate-400">
