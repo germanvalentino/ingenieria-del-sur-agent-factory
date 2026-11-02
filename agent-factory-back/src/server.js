@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import healthRoutes from "./routes/health.routes.js";
 import { pool } from "./db.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import tasksRoutes from "./routes/tasks.routes.js";
@@ -24,13 +25,7 @@ app.use("/api/projects", projectsRoutes);
 app.use("/api/specifications", specificationsRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "Ingeniería del Sur Agent Factory",
-    timestamp: new Date().toISOString(),
-  });
-});
+app.use("/api/health", healthRoutes);
 
 app.get("/api/db-health", async (req, res) => {
   try {

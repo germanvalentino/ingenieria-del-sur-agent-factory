@@ -23,8 +23,14 @@ for (const [route, operation, state] of [
     await handler({ params: { id: '12' }, body: {} }, response);
     assert.equal(response.statusCode, 500);
     assert.deepEqual(response.body, { status: 'error', message: error.message });
-    assert.ok(queries[1].sql.includes(state));
-    assert.equal(queries[1].values[0], '12');
+  if (route === 'qa') {
+  // El error ocurre antes de adquirir la reserva de QA.
+  // No debe intentarse liberar una reserva inexistente.
+  assert.equal(queries.length, 1);
+} else {
+  assert.ok(queries[1].sql.includes(state));
+  assert.equal(queries[1].values[0], '12');
+}
     assert.equal(logs.length, 1);
     assert.equal(logs[0][1].operation, operation);
     assert.equal(logs[0][1].taskId, '12');
