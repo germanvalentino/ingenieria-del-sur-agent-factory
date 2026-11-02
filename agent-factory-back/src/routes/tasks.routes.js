@@ -1586,6 +1586,8 @@ router.post(
               auto_correction_stage = 'qa',
               updated_at = NOW()
           WHERE id = $1
+            AND status = 'review'
+            AND qa_status IS DISTINCT FROM 'running'
             AND auto_correction_active = FALSE
           RETURNING *
         `,
@@ -1861,7 +1863,7 @@ router.post(
         error
       );
 
-      await pool.query(
+      if (cycleStarted) await pool.query(
         `
           UPDATE tasks
           SET qa_status = $3,

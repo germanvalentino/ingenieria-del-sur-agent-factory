@@ -635,7 +635,8 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [runningTaskIds, setRunningTaskIds] =
     useState(() => new Set());
-  const [qaTaskId, setQaTaskId] = useState(null);
+  const [qaTaskIds, setQaTaskIds] = useState(() => new Set());
+  const qaInFlightRef = useRef(new Set());
   const [pushingTaskId, setPushingTaskId] = useState(null);
   const [
   correctionTaskId,
@@ -945,9 +946,11 @@ function App() {
   }
 
 async function runQa(taskId) {
+  if (qaInFlightRef.current.has(taskId)) return;
+  qaInFlightRef.current.add(taskId);
   try {
     rememberQueuePosition(taskId);
-    setQaTaskId(taskId);
+    setQaTaskIds((current) => new Set(current).add(taskId));
     setError("");
 
     setDashboard((current) => ({
@@ -985,7 +988,12 @@ async function runQa(taskId) {
     setError(getErrorMessage(err));
     await loadDashboard();
   } finally {
-    setQaTaskId(null);
+    qaInFlightRef.current.delete(taskId);
+    setQaTaskIds((current) => {
+      const next = new Set(current);
+      next.delete(taskId);
+      return next;
+    });
   }
 }
 
@@ -1006,7 +1014,7 @@ async function stopAutomaticCycle(taskId) {
 async function authorizeQaFallback(taskId) {
   if (!window.confirm("El QA alternativo sera realizado por el mismo proveedor que desarrollo. No es independiente y requiere otra confirmacion humana para integrar a main. ¿Autorizar esta revision provisional?")) return;
   try {
-    setQaTaskId(taskId);
+    setQaTaskIds((current) => new Set(current).add(taskId));
     setError("");
     const response = await fetch(`${API_URL}/tasks/${taskId}/qa/authorize-fallback`, {
       method: "POST",
@@ -1020,7 +1028,11 @@ async function authorizeQaFallback(taskId) {
     setError(getErrorMessage(err));
     await loadDashboard();
   } finally {
-    setQaTaskId(null);
+    setQaTaskIds((current) => {
+      const next = new Set(current);
+      next.delete(taskId);
+      return next;
+    });
   }
 }
 
@@ -1666,7 +1678,7 @@ async function correctTask(taskId) {
                                 <p className="text-sm font-semibold text-amber-200">QA cruzado bloqueado: el revisor no tiene cuota disponible.</p>
                                 <p className="mt-2 text-xs text-amber-100">Podés esperar y reintentar el QA cruzado, o autorizar una revisión provisional con el proveedor que desarrolló. Esta última requiere confirmación humana adicional antes de integrar a main.</p>
                                 <button type="button" onClick={() => authorizeQaFallback(task.id)}
-                                  disabled={qaTaskId !== null || hasActiveAutomaticCycle}
+                                  disabled={qaTaskIds.has(task.id) || task.auto_correction_active}
                                   className="mt-3 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50">
                                   Autorizar QA alternativo
                                 </button>
@@ -2134,8 +2146,8 @@ async function correctTask(taskId) {
       type="button"
       onClick={() => runQa(task.id)}
       disabled={
-        qaTaskId !== null ||
-        hasActiveAutomaticCycle
+        qaTaskIds.has(task.id) ||
+        task.auto_correction_active
       }
       className="flex items-center gap-2 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-400 disabled:opacity-50"
     >
