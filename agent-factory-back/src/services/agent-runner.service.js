@@ -1,3 +1,5 @@
+import { collectExecutionDiff, buildSelectiveContext, contextLimits, contextError } from "./selective-context.service.js";
+import { redactSecrets } from "./secret-redaction.service.js";
 import { executeClaude, getClaudeDefaultModel } from "./claude.service.js";
 import { executeCodex } from "./codex.service.js";
 import { executeOllama, getOllamaDefaultModel } from "./ollama.service.js";
@@ -465,7 +467,7 @@ export function getExecutionModel({
   return model;
 }
 
-export function executeAgent({
+async function dispatchAgent({
   provider,
   workingDirectory,
   prompt,
@@ -507,4 +509,19 @@ export function executeAgent({
     }),
     skipGitRepoCheck,
   });
+}
+
+export async function executeAgent(options) {
+  let prompt = redactSecrets(options.prompt);
+  let contextMetrics = options.contextMetrics;
+  if (!options.contextPrepared && options.workingDirectory && options.sandbox !== 'read-only') {
+    const changes = await collectExecutionDiff(options.workingDirectory);
+    const context = await buildSelectiveContext(changes);
+    prompt += '\n' + context.text + '\nLee solamente archivos relacionados con la tarea y dependencias directas. Nunca recorras el repositorio completo, historiales, archivos excluidos, secretos ni .env. No repitas lecturas del contenido provisto.';
+    contextMetrics = context.metrics;
+  }
+  if (prompt.length > contextLimits().total) throw contextError('Contexto inseguro: prompt excede limite total', contextMetrics);
+  contextMetrics = { ...contextMetrics, characters: prompt.length };
+  try { return { ...await dispatchAgent({ ...options, prompt }), contextMetrics }; }
+  catch (error) { if (error.agentResult) error.agentResult.contextMetrics = contextMetrics; throw error; }
 }

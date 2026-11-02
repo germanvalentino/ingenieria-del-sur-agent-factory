@@ -1,3 +1,4 @@
+import { blockingQa } from "../services/selective-context.service.js";
 import { canCorrect, worktreeFingerprint, resolveQaClassification, correctionOutcome } from "../services/qa-cycle.service.js";
 import { Router } from "express";
 import { existsSync } from "node:fs";
@@ -52,6 +53,7 @@ function assertProviderAllowedForRole({
 function executionMetadata(result) {
   return {
     usage: result.usage,
+    contextMetrics: result.contextMetrics,
     model: result.model,
     costUsd: result.costUsd,
     durationMs: result.durationMs,
@@ -164,6 +166,7 @@ async function runProviderBackedAttempt({
         ...(error.agentResult
           ? executionMetadata(error.agentResult)
           : {}),
+        contextMetrics: error.contextMetrics || error.agentResult?.contextMetrics,
         errorMessage: error.message,
       });
 
@@ -372,7 +375,7 @@ ${
 }
 
 RESULTADO COMPLETO DEL ÃšLTIMO QA:
-${qaSummary || "No hay resultado QA disponible."}
+${blockingQa(qaSummary, task.qa_details?.classification) || "No hay hallazgos bloqueantes QA."}
 
 INSTRUCCIONES:
 - RevisÃ¡ los cambios existentes antes de modificar.
@@ -486,6 +489,7 @@ async function runQaAttempt({
           qaResult.status,
         getMetadata: (qaResult) => ({
           usage: qaResult.aiUsage,
+          contextMetrics: qaResult.contextMetrics,
           model: qaResult.aiModel,
           durationMs: qaResult.durationMs,
           costUsd: qaResult.costUsd,
@@ -1412,7 +1416,8 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
         },
       }),
       getStatus: (result) => result.status,
-      getMetadata: (result) => ({ usage: result.aiUsage, model: result.aiModel }),
+      getMetadata: (result) => ({ usage: result.aiUsage,
+          contextMetrics: result.contextMetrics, model: result.aiModel }),
     });
     const control = await pool.query(`SELECT auto_correction_active, qa_stop_requested FROM tasks WHERE id = $1`, [task.id]);
     const resolved = resolveQaClassification({ classification: attempt.result.classification, sourceExecutionId,
@@ -2103,8 +2108,8 @@ ${task.review_feedback}
 
 RESULTADO QA ANTERIOR:
 ${
-  task.qa_summary ||
-  "No hay resultado QA disponible."
+  blockingQa(task.qa_summary, task.qa_details?.classification) ||
+  "No hay hallazgos bloqueantes QA."
 }
 
 INSTRUCCIONES:

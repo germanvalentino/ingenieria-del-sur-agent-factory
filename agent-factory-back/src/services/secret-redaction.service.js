@@ -3,7 +3,7 @@ const SENSITIVE_NAME_ALTERNATION =
 const SECRET_ENV_KEY_PATTERN = new RegExp(SENSITIVE_NAME_ALTERNATION, "i");
 const CONNECTION_STRING_PATTERN = /(:\/\/[^:@/\s]+:)([^@/\s]+)(@)/g;
 const KEY_VALUE_SECRET_PATTERN = new RegExp(
-  `([A-Za-z0-9_.-]*(?:${SENSITIVE_NAME_ALTERNATION})[A-Za-z0-9_.-]*)\\s*[:=]\\s*\\S+`,
+  `(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]*(?:${SENSITIVE_NAME_ALTERNATION})[A-Za-z0-9_.-]*)\\s*[:=]\\s*\\S+`,
   "gi"
 );
 const BEARER_TOKEN_PATTERN = /\bBearer\s+\S+/gi;

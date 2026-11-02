@@ -1958,6 +1958,11 @@ async function correctTask(taskId) {
                                                       </span>
                                                     </div>
 
+                                                    <div className="mt-3 text-xs text-slate-400">
+                                                      Contexto: {execution.context_metrics?.characters ?? "Sin datos"} caracteres · Archivos: {execution.context_metrics?.includedFiles?.length ?? "Sin datos"} · Cache: {execution.cached_percent == null ? "Sin datos" : `${execution.cached_percent}%`} · Bloques: {execution.context_metrics?.blocksReviewed ?? "Sin datos"}
+                                                      {execution.comparison && <p>Vs. anterior equivalente: contexto {execution.comparison.contextPercent ?? "Sin datos"}% · tokens de entrada {execution.comparison.inputTokensPercent ?? "Sin datos"}%</p>}
+                                                      {execution.context_metrics?.excludedFiles?.length > 0 && <details><summary>Contenido omitido ({execution.context_metrics.excludedFiles.length})</summary>{execution.context_metrics.excludedFiles.map((item, i) => <p key={i}>{item.file}: {item.reason}</p>)}</details>}
+                                                    </div>
                                                     <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(180px,100%),1fr))] gap-2 text-xs text-slate-400">
                                                       <p className="min-w-0 break-words">
                                                         Proveedor:{" "}

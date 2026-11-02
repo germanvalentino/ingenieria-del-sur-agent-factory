@@ -5,8 +5,32 @@ import fs from "node:fs/promises";
 import path from "node:path";
 const exec = promisify(execFile);
 export function classifyVerdict(output) {
-  const first = String(output || "").trim().split(/\r?\n/)[0];
-  return first === "QA_PASS" ? "passed" : first === "QA_FAIL" ? "functional_failure" : "inconclusive";
+  const normalizedOutput = String(output ?? "")
+    // Los proveedores pueden anteponer secuencias ANSI o envolver el
+    // marcador con formato Markdown. Eso no debe cambiar el veredicto.
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/^\uFEFF/, "");
+
+  for (const line of normalizedOutput.split(/\r?\n/)) {
+    const normalizedLine = line
+      .trim()
+      .replace(/^(?:```(?:text|markdown)?\s*)/i, "")
+      .replace(/^(?:\*\*|__)/, "")
+      .replace(/(?:\*\*|__)$/, "")
+      .trim();
+
+    // El primer marcador independiente es definitivo. Las menciones
+    // posteriores forman parte del resumen y nunca deben sobrescribirlo.
+    if (normalizedLine === "QA_PASS") {
+      return "passed";
+    }
+
+    if (normalizedLine === "QA_FAIL") {
+      return "functional_failure";
+    }
+  }
+
+  return "inconclusive";
 }
 export function canCorrect({ classification, active, consumed, fresh = true }) {
   return classification === "functional_failure" && active && fresh && consumed < 3;
@@ -51,7 +75,7 @@ export async function worktreeFingerprint(root) {
 export async function fingerprintFiles(root, files, readFile = fs.readFile) {
   const hash = createHash("sha256");
   for (const file of [...new Set(files)].sort()) {
-    if (file.split("/").some(part => part === ".env" || part.startsWith(".env."))) continue;
+    if (file.split("/").some(part => part.toLowerCase().startsWith(".env"))) continue;
     hash.update(file);
     try { hash.update(await readFile(path.join(root, file))); }
     catch (error) { if (error.code === "ENOENT") hash.update("deleted"); else throw error; }

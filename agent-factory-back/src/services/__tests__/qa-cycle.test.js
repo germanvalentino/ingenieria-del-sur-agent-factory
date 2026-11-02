@@ -1,3 +1,4 @@
+import { blockingQa } from "../selective-context.service.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fingerprintFiles, classifyVerdict, canCorrect, resolveQaClassification, correctionOutcome, classifyCommandFailure, isText, reviewChunks } from "../qa-cycle.service.js";
@@ -60,6 +61,13 @@ for (const script of ["node --check", "lint", "test", "build", "npm ci"]) {
     const fixtureResult = fixture([{ script, status: "failed", output: "src/a.js: invalid syntax" }]);
     const result = await runQaValidation({ workingDirectory: "C:/proyectos/test", dependencies: fixtureResult.dependencies });
     assert.equal(fixtureResult.calls(), 0);
+    const correctionContext = blockingQa(result.summary, result.classification);
+    if (result.classification === "functional_failure") {
+      assert.ok(correctionContext.includes(script));
+      assert.ok(correctionContext.includes("src/a.js: invalid syntax"));
+    } else {
+      assert.equal(correctionContext, "");
+    }
     assert.equal(result.classification, script === "npm ci" ? "technical_error" : "functional_failure");
     assert.match(result.summary, new RegExp(script === "node --check" ? "node --check" : script));
   });
@@ -118,4 +126,16 @@ test("fingerprint detects content edits even when git status paths stay the same
   const changed = await fingerprintFiles("repo", files, async () => Buffer.from("after"));
   assert.equal(before, unchanged);
   assert.notEqual(before, changed);
+});
+
+test("context overflow prevents every provider call and never returns QA_PASS", async () => {
+  const f = fixture([], ["QA_PASS"], "diff --git a/a b/a\n" + "x".repeat(250000));
+  await assert.rejects(runQaValidation({ workingDirectory: "C:/proyectos/test", dependencies: f.dependencies }), error => error.qaClassification === "technical_error");
+  assert.equal(f.calls(), 0);
+});
+test("non-reviewable source changes block QA approval", async () => {
+  const f = fixture([], ["QA_PASS"]);
+  f.dependencies.readChanges = async () => ({ diff: "diff --git a/a b/a\n+code", excluded: [{ file: "src/b.js", reason: "binary" }] });
+  await assert.rejects(runQaValidation({ workingDirectory: "C:/proyectos/test", dependencies: f.dependencies }), error => error.qaClassification === "technical_error");
+  assert.equal(f.calls(), 0);
 });

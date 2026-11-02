@@ -1,3 +1,5 @@
+import { collectExecutionDiff, buildSelectiveContext, qaContextChunks, includeContextFile, contextLimits, contextError } from "./selective-context.service.js";
+import { redactSecrets } from "./secret-redaction.service.js";
 import { classifyVerdict, classifyCommandFailure, isText, reviewChunks, worktreeFingerprint } from "./qa-cycle.service.js";
 import {
   execFile,
@@ -619,32 +621,7 @@ async function executeLintWithBaseline({
 }
 
 export function shouldIncludeReviewFile(gitPath) {
-  const normalized = normalizeGitPath(gitPath);
-  const parts = normalized.split("/");
-  const filename =
-    parts.at(-1)?.toLowerCase() || "";
-  if (filename === "package-lock.json") return false;
-
-  if (
-    EXCLUDED_REVIEW_FILENAMES.has(filename) ||
-    filename.startsWith(".env.")
-  ) {
-    return false;
-  }
-
-  if (
-    EXCLUDED_REVIEW_EXTENSIONS.has(
-      path.extname(filename)
-    )
-  ) {
-    return false;
-  }
-
-  return !parts.some((part) =>
-    EXCLUDED_REVIEW_DIRECTORIES.has(
-      part.toLowerCase()
-    )
-  );
+  return includeContextFile(gitPath);
 }
 
 function getReviewableGitPaths(paths) {
@@ -757,95 +734,7 @@ async function buildUntrackedFilesDiff({
   return diffs.join("\n\n");
 }
 
-async function getGitChanges(
-  workingDirectory
-) {
-  /*
-   * Hace visibles en git diff también los archivos
-   * nuevos, sin agregarlos realmente al commit.
-   */
-  const repositoryRoot = validateDirectory(
-    await runGit(
-      ["rev-parse", "--show-toplevel"],
-      workingDirectory
-    )
-  );
-  const [
-    status,
-    unstagedPathsResult,
-    stagedPathsResult,
-    untrackedResult,
-  ] =
-    await Promise.all([
-      getGitStatusSnapshot(
-        repositoryRoot
-      ),
-      runGit(
-        [
-          "diff",
-          "--name-only",
-          "--",
-        ],
-        repositoryRoot
-      ),
-      runGit(
-        [
-          "diff",
-          "--cached",
-          "--name-only",
-          "--",
-        ],
-        repositoryRoot
-      ),
-      runGit(
-        [
-          "ls-files",
-          "--others",
-          "--exclude-standard",
-        ],
-        repositoryRoot
-      ),
-    ]);
 
-  const unstagedDiff = await getReviewDiff({
-    workingDirectory: repositoryRoot,
-    cached: false,
-    paths: unstagedPathsResult.split(/\r?\n/),
-  });
-  const stagedDiff = await getReviewDiff({
-    workingDirectory: repositoryRoot,
-    cached: true,
-    paths: stagedPathsResult.split(/\r?\n/),
-  });
-  const trackedDiff = [
-    unstagedDiff,
-    stagedDiff,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-  const untrackedDiff =
-    await buildUntrackedFilesDiff({
-      workingDirectory: repositoryRoot,
-      untrackedPaths: getReviewableGitPaths(
-        untrackedResult.split(/\r?\n/)
-      ),
-    });
-  const diff = [trackedDiff, untrackedDiff]
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-
-  if (!diff) {
-    const error = new Error("QA no encontro cambios textuales para revisar");
-    error.qaClassification = "inconclusive";
-    throw error;
-  }
-
-  return {
-    status: sanitizeGitStatus(status),
-    diff,
-  };
-}
 
 async function runProjectValidations({
   workingDirectory,
@@ -1022,10 +911,11 @@ export async function runQaValidation({
   shouldContinue = async () => true,
   dependencies = {},
 }) {
+  const started = Date.now();
   const validateProject = dependencies.validateProject || runProjectValidations;
   const readStatus = dependencies.readStatus || getGitStatusSnapshot;
   const changedFiles = dependencies.changedFiles || getGitChangedPaths;
-  const readChanges = dependencies.readChanges || getGitChanges;
+  const readChanges = dependencies.readChanges || collectExecutionDiff;
   const review = dependencies.review || executeAgent;
   const assertUnchanged = dependencies.assertUnchanged || assertGitStatusUnchanged;
   const fingerprint = dependencies.fingerprint || worktreeFingerprint;
@@ -1174,6 +1064,8 @@ export async function runQaValidation({
 
     return {
       status: "failed",
+      contextMetrics: { characters: 0, includedFiles: [], excludedFiles: [], blocksReviewed: 0 },
+      durationMs: Date.now() - started,
       classification: classifyCommandFailure(results.find(r => r.status === "failed"), await changedFiles(safeDirectory)),
       reason: commandsSummary,
       summary: commandsSummary,
@@ -1191,13 +1083,20 @@ export async function runQaValidation({
   const gitChanges =
   await readChanges(safeDirectory);
 
-  const chunks = reviewChunks(gitChanges.diff);
+  const context = await buildSelectiveContext({ root: gitChanges.root || safeDirectory, diff: gitChanges.diff, excluded: gitChanges.excluded, intentionalLocks: gitChanges.intentionalLocks });
+  if (!context.diff.trim()) throw Object.assign(new Error('QA sin cambios textuales revisables'), { qaClassification: 'inconclusive', contextMetrics: context.metrics });
+  if (context.metrics.excludedFiles.some(item => ['binary', 'non-regular'].includes(item.reason))) throw contextError('Contexto inseguro: cambios no revisables requieren revision adicional', context.metrics);
+  const chunks = qaContextChunks(context.diff);
+  const contextMetrics = { ...context.metrics, characters: 0, blocksReviewed: 0 };
   const reviews = [];
-  const started = Date.now();
   let technicalError = null;
+  const reviewPrompts = [];
   for (const chunk of chunks) {
-  if (!await shouldContinue()) break;
-  const reviewPrompt = `
+  const relatedContext = context.dependencyFiles.filter(text => {
+    const file = text.match(/^ARCHIVO (.+):\n/)?.[1];
+    return !chunk.startsWith("diff --git ") || context.dependencyOwners[file]?.some(owner => chunk.includes(`b/${owner}`));
+  }).join("\n\n");
+  let reviewPrompt = `
 Sos el QA Agent de Ingeniería del Sur.
 
 Tu trabajo es revisar los cambios sin modificar ningún archivo.
@@ -1222,9 +1121,9 @@ Si las observaciones humanas posteriores contradicen el requerimiento original, 
 
 INSTRUCCIONES:
 - Revisá exclusivamente el STATUS y DIFF entregados dentro de este mensaje.
-- Este mensaje contiene un grupo de archivos o un segmento de un diff grande. No rechaces por contexto ausente; pedi contexto de solo lectura si resulta necesario.
+- Este mensaje contiene un grupo de archivos o un segmento de un diff grande. Si falta contexto necesario, no emitas QA_PASS: responde INCONCLUSIVE y explica el impedimento.
 - No intentes ejecutar git diff.
-- Podés leer archivos del proyecto solamente si necesitás contexto adicional.
+- Lee archivos adicionales solamente si son dependencias directas del cambio. No recorras el repositorio ni releas contenido incluido. Nunca leas .env, secretos, binarios, logs ni archivos generados.
 - No modifiques archivos.
 - No hagas commit, push, merge ni deploy.
 - Buscá errores lógicos, regresiones, problemas de seguridad y criterios incumplidos.
@@ -1237,12 +1136,15 @@ INSTRUCCIONES:
 - Si no encontrás problemas bloqueantes, emití QA_PASS.
 
 STATUS DE GIT:
-${gitChanges.status}
+${gitChanges.status || "Ver diff"}
 
 DIFF EXACTO DE LA TAREA:
 \`\`\`diff
 ${chunk}
 \`\`\`
+
+DEPENDENCIAS DIRECTAS:
+${relatedContext}
 
 FORMATO OBLIGATORIO:
 La primera línea de tu respuesta debe ser exactamente QA_PASS o QA_FAIL.
@@ -1253,16 +1155,26 @@ HALLAZGOS:
 RIESGOS:
 `;
 
+  reviewPrompt = redactSecrets(reviewPrompt);
+  reviewPrompts.push(reviewPrompt);
+  }
+  if (reviewPrompts.reduce((sum, prompt) => sum + prompt.length, 0) > contextLimits().total) throw contextError("Contexto inseguro: prompts QA exceden limite total", contextMetrics);
+  for (const reviewPrompt of reviewPrompts) {
+  if (!await shouldContinue()) break;
+  contextMetrics.characters += reviewPrompt.length;
   try {
   const agentReview =
     await review({
       provider,
       workingDirectory: safeDirectory,
       prompt: reviewPrompt,
+      contextPrepared: true,
+      contextMetrics,
       sandbox: "read-only",
     });
 
   reviews.push(agentReview);
+  contextMetrics.blocksReviewed++;
   } catch (error) {
     technicalError = error.message;
     if (error.agentResult) reviews.push(error.agentResult);
@@ -1295,6 +1207,7 @@ RIESGOS:
 
   return {
     status: verdict.status,
+    contextMetrics,
     classification,
     reason: technicalError || (classification === "inconclusive" ? "Revision incompleta, detenida o sin veredicto valido" : agentReview.output),
     durationMs: Date.now() - started,

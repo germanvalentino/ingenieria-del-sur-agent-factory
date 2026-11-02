@@ -44,6 +44,7 @@ export async function ensureProjectLaunchSchema({ db = null } = {}) {
   try {
     await resolvedDb.query(sql);
     await resolvedDb.query(await fs.readFile(path.join(path.dirname(MIGRATION_PATH), "016-qa-cycle.sql"), "utf8"));
+    await resolvedDb.query(await fs.readFile(path.join(path.dirname(MIGRATION_PATH), "017-selective-context.sql"), "utf8"));
   } catch (error) {
     const sanitized = redactSecrets(error?.message || "error desconocido");
 

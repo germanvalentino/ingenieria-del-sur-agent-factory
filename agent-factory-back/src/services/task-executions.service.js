@@ -101,6 +101,7 @@ export async function finishTaskExecution({
   modelUsage = null,
   permissionDenials = null,
   errorMessage = null,
+  contextMetrics = null,
 }) {
   if (!executionId) {
     return null;
@@ -112,7 +113,8 @@ export async function finishTaskExecution({
   const result = await pool.query(
     `
       UPDATE task_executions
-      SET status = $2,
+      SET context_metrics = $14::jsonb,
+          status = $2,
           input_tokens = $3,
           cached_input_tokens = $4,
           output_tokens = $5,
@@ -154,6 +156,7 @@ export async function finishTaskExecution({
         ? JSON.stringify(permissionDenials)
         : null,
       durationMs,
+      contextMetrics ? JSON.stringify(contextMetrics) : null,
     ]
   );
 
@@ -168,6 +171,7 @@ export async function getTaskExecutionsSummary(
       pool.query(
         `
           SELECT
+            context_metrics,
             id,
             task_id,
             agent_id,
@@ -241,7 +245,12 @@ export async function getTaskExecutionsSummary(
   const summary = summaryResult.rows[0];
 
   return {
-    executions: executionsResult.rows,
+    executions: executionsResult.rows.map((row, index, rows) => {
+      const previous = rows.slice(index + 1).find(old => old.execution_type === row.execution_type && old.provider === row.provider && old.model === row.model);
+      const percent = (current, old) => Number(old) > 0 && current != null ? Math.round((Number(current) / Number(old) - 1) * 100) : null;
+      return { ...row, cached_percent: Number(row.input_tokens) > 0 && row.cached_input_tokens != null ? Math.round(Number(row.cached_input_tokens) / Number(row.input_tokens) * 100) : null,
+        comparison: previous ? { executionId: previous.id, contextPercent: percent(row.context_metrics?.characters, previous.context_metrics?.characters), inputTokensPercent: percent(row.input_tokens, previous.input_tokens) } : null };
+    }),
     summary: {
       totalExecutions:
         summary.total_executions,
