@@ -1,3 +1,5 @@
+import { executionDiagnostics } from "../services/execution-diagnostics.service.js";
+import { performance } from "node:perf_hooks";
 import { blockingQa } from "../services/selective-context.service.js";
 import { canCorrect, worktreeFingerprint, resolveQaClassification, correctionOutcome } from "../services/qa-cycle.service.js";
 import { Router } from "express";
@@ -975,6 +977,7 @@ router.get(
 
 
 router.post("/:id/run", async (req, res) => {
+  const diagnosticStarted = performance.now();
   let agentId;
   let worktree;
   let executionId;
@@ -1339,7 +1342,7 @@ REGLAS OBLIGATORIAS:
 
     console.error(
       "Error ejecutando agente:",
-      error
+      executionDiagnostics(error, { operation: "development", taskId: req.params.id, durationMs: performance.now() - diagnosticStarted })
     );
 
     await pool.query(
@@ -1491,7 +1494,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
     return res.json(updated.rows[0]);
   } catch (error) {
     await recordQaDetails(req.params.id, { classification: 'technical_error', reason: error.message }, error.executionId);
-    console.error('Error en QA alternativo autorizado:', error);
+    console.error('Error en QA alternativo autorizado:', executionDiagnostics(error, { operation: 'qa-alternative', taskId: req.params.id }));
     return res.status(500).json({ message: error.message });
   } finally {
     if (locked) {
@@ -1499,7 +1502,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
         `UPDATE tasks SET qa_status = 'pending', auto_correction_active = FALSE,
          auto_correction_stage = NULL, updated_at = NOW() WHERE id = $1`,
         [req.params.id]
-      ).catch((error) => console.error('No se pudo liberar QA:', error));
+      ).catch((error) => console.error('No se pudo liberar QA:', executionDiagnostics(error, { operation: 'qa-release', taskId: req.params.id })));
     }
   }
 });
@@ -1507,6 +1510,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
 router.post(
   "/:id/qa",
   async (req, res) => {
+    const diagnosticStarted = performance.now();
     let qaAgentId;
     let correctionAgentId;
     let cycleStarted = false;
@@ -1860,7 +1864,7 @@ router.post(
     } catch (error) {
       console.error(
         "Error ejecutando QA:",
-        error
+        executionDiagnostics(error, { operation: "qa", taskId: req.params.id, durationMs: performance.now() - diagnosticStarted })
       );
 
       if (cycleStarted) await pool.query(
@@ -1997,6 +2001,7 @@ router.post(
   async (req, res) => {
     let agentId;
     let executionId;
+    const diagnosticStarted = performance.now();
     let taskWasMarkedRunning = false;
 
     try {
@@ -2274,7 +2279,7 @@ correction_count =
 
       console.error(
         "Error corrigiendo tarea:",
-        error
+        executionDiagnostics(error, { operation: "correction", taskId: req.params.id, durationMs: performance.now() - diagnosticStarted })
       );
 
       await pool.query(
