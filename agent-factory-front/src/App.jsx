@@ -655,8 +655,8 @@ function App() {
     useState("operations");
   const [form, setForm] = useState(initialForm);
   const [saving, setSaving] = useState(false);
-  const [runningTaskId, setRunningTaskId] =
-    useState(null);
+  const [runningTaskIds, setRunningTaskIds] =
+    useState(() => new Set());
   const [qaTaskId, setQaTaskId] = useState(null);
   const [pushingTaskId, setPushingTaskId] = useState(null);
   const [
@@ -895,7 +895,7 @@ function App() {
   async function runTask(taskId) {
     try {
       rememberQueuePosition(taskId);
-      setRunningTaskId(taskId);
+      setRunningTaskIds((previous) => new Set([...previous, taskId]));
       setError("");
 
       setDashboard((current) => ({
@@ -931,7 +931,11 @@ function App() {
       setError(getErrorMessage(err));
       await loadDashboard();
     } finally {
-      setRunningTaskId(null);
+      setRunningTaskIds((previous) => {
+        const next = new Set(previous);
+        next.delete(taskId);
+        return next;
+      });
     }
   }
 
@@ -2117,7 +2121,7 @@ async function correctTask(taskId) {
                                 runTask(task.id)
                               }
                               disabled={
-                                runningTaskId !== null
+                                runningTaskIds.has(task.id)
                               }
                               className="flex items-center gap-2 rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-sky-400 disabled:opacity-50"
                             >

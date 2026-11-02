@@ -1070,6 +1070,26 @@ router.post("/:id/run", async (req, res) => {
 
     agentId = agent.id;
 
+    // Atomic reservation: only one request may start this queued task.
+    // Reserve before preparing its worktree to prevent duplicate Git operations.
+    const reservation = await pool.query(
+      `UPDATE tasks
+       SET status = 'running',
+           execution_started_at = NOW(),
+           execution_finished_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1 AND status = 'queued'
+       RETURNING id`,
+      [task.id]
+    );
+    if (!reservation.rowCount) {
+      return res.status(409).json({
+        status: 'error',
+        message: 'La tarea ya fue iniciada por otra ejecución',
+      });
+    }
+    taskWasMarkedRunning = true;
+
     /*
      * El worktree se prepara antes de ejecutar
      * Codex. La carpeta principal no se modifica.
@@ -1158,7 +1178,7 @@ SET status = 'running',
     execution_started_at = NOW(),
     execution_finished_at = NULL,
     updated_at = NOW()
-WHERE id = $1
+WHERE id = $1 AND status = 'running'
       `,
       [
   task.id,
@@ -1295,10 +1315,14 @@ REGLAS OBLIGATORIAS:
 
     await pool.query(
       `
-        UPDATE agents
-        SET status = 'idle',
-            updated_at = NOW()
-        WHERE id = $1
+        UPDATE agents a
+        SET status = 'idle', updated_at = NOW()
+        WHERE a.id = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+            WHERE t.assigned_role = a.role
+              AND (t.status = 'running' OR t.qa_status = 'running')
+          )
       `,
       [agent.id]
     );
@@ -1345,10 +1369,14 @@ REGLAS OBLIGATORIAS:
     if (agentId) {
       await pool.query(
         `
-          UPDATE agents
-          SET status = 'idle',
-              updated_at = NOW()
-          WHERE id = $1
+          UPDATE agents a
+          SET status = 'idle', updated_at = NOW()
+          WHERE a.id = $1
+            AND NOT EXISTS (
+              SELECT 1 FROM tasks t
+              WHERE t.assigned_role = a.role
+                AND (t.status = 'running' OR t.qa_status = 'running')
+            )
         `,
         [agentId]
       );
