@@ -52,6 +52,11 @@ export async function startTaskExecution({
   provider,
   model = null,
 }) {
+  if (["development", "correction"].includes(executionType)) {
+    await pool.query(`UPDATE tasks SET qa_status = 'pending',
+      qa_details = COALESCE(qa_details, '{}'::jsonb) || '{"classification":"stale","reason":"Se inicio una nueva ejecucion de desarrollo"}'::jsonb
+      WHERE id = $1`, [taskId]);
+  }
   const result = await pool.query(
     `
       INSERT INTO task_executions (

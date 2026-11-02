@@ -49,7 +49,8 @@ test("ensureProjectLaunchSchema aplica la migración contra el pool recibido", a
 
   await ensureProjectLaunchSchema({ db: fakeDb });
 
-  assert.equal(queries.length, 1);
+  assert.equal(queries.length, 2);
+  assert.match(queries[1], /qa_details/);
   assert.match(queries[0], /project_processes/);
 });
 

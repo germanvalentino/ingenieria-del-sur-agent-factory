@@ -977,8 +977,6 @@ async function runQa(taskId) {
               qa_status: "running",
               auto_correction_active: true,
               auto_correction_stage: "qa",
-              auto_correction_finished_count: 0,
-              correction_attempts: 0,
             }
           : task
       ),
@@ -1006,6 +1004,20 @@ async function runQa(taskId) {
     await loadDashboard();
   } finally {
     setQaTaskId(null);
+  }
+}
+
+async function stopAutomaticCycle(taskId) {
+  try {
+    setError("");
+    const response = await fetch(`${API_URL}/tasks/${taskId}/qa/stop`, { method: "POST" });
+    const updated = await response.json();
+    if (!response.ok) throw new Error(updated.message || "No se pudo detener el ciclo");
+    setDashboard(previous => ({ ...previous,
+      tasks: previous.tasks.map(task => task.id === updated.id ? updated : task),
+    }));
+  } catch (error) {
+    setError(getErrorMessage(error));
   }
 }
 
@@ -1617,6 +1629,19 @@ async function correctTask(taskId) {
                             {task.branch_name}
                           </p>
 
+                          {task.qa_details && (
+                            <div className="mt-3 text-xs text-slate-300 space-y-1">
+                              <p>Desarrollo: {task.qa_details.developer || task.provider} / QA: {task.qa_details.reviewer || "Sin datos"}</p>
+                              <p>Clasificación: {task.qa_details.classification} / Intento: {task.qa_details.attempt || "Sin datos"}</p>
+                              <p>Correcciones: {task.correction_attempts || 0} consumidas / {Math.max(0, 3 - (task.correction_attempts || 0))} disponibles</p>
+                              <p>Fallback: {task.qa_details.fallback ? JSON.stringify(task.qa_details.fallback) : "No"}</p>
+                              <p>Duración: {task.qa_details.durationMs == null ? "Sin datos" : `${(task.qa_details.durationMs / 1000).toFixed(1)} s`} / Tokens: {task.qa_details.tokens ?? "Sin datos"} / Costo USD: {task.qa_details.costUsd ?? "Sin datos"}</p>
+                              <details><summary>Motivo</summary><pre className="whitespace-pre-wrap">{task.qa_details.reason}</pre></details>
+                            </div>
+                          )}
+                          {task.auto_correction_active && (
+                            <button disabled={task.qa_stop_requested} className="mt-2 rounded bg-red-900 px-3 py-2 text-sm disabled:opacity-50" onClick={() => stopAutomaticCycle(task.id)}>{task.qa_stop_requested ? "Deteniendo ciclo..." : "Detener ciclo autom\u00e1tico"}</button>
+                          )}
                           {task.auto_correction_active && (
                             <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200">
                               <LoaderCircle

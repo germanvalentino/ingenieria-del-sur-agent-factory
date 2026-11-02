@@ -8,7 +8,10 @@ export async function recoverInterruptedTasks() {
 
     const tasksResult = await client.query(`
       UPDATE tasks
-      SET status = 'failed',
+      SET status = CASE WHEN auto_correction_active THEN 'review' ELSE 'failed' END,
+          qa_details = CASE WHEN auto_correction_active OR qa_status = 'running'
+            THEN COALESCE(qa_details, '{}'::jsonb) || '{"classification":"technical_error","reason":"Ciclo interrumpido por reinicio del backend"}'::jsonb
+            ELSE qa_details END,
           qa_status =
             CASE
               WHEN qa_status = 'running'
@@ -29,7 +32,7 @@ export async function recoverInterruptedTasks() {
               ELSE qa_finished_at
             END,
           updated_at = NOW()
-      WHERE status = 'running'
+      WHERE status = 'running' OR auto_correction_active = TRUE OR qa_status = 'running'
       RETURNING id, title
     `);
 
@@ -44,6 +47,9 @@ export async function recoverInterruptedTasks() {
     const executionsResult = await client.query(`
       UPDATE task_executions
       SET status = 'failed',
+          qa_details = CASE WHEN execution_type = 'qa'
+            THEN COALESCE(qa_details, '{}'::jsonb) || '{"classification":"technical_error","reason":"QA interrumpido por reinicio del backend"}'::jsonb
+            ELSE qa_details END,
           finished_at = NOW(),
           duration_ms =
             FLOOR(

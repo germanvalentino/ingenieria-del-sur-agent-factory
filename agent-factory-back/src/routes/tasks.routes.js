@@ -1,3 +1,4 @@
+import { canCorrect, worktreeFingerprint, resolveQaClassification, correctionOutcome } from "../services/qa-cycle.service.js";
 import { Router } from "express";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -412,11 +413,29 @@ async function getCrossQaProvider(taskId) {
   return { developer, reviewer };
 }
 
+async function latestDevelopment(taskId) {
+  const result = await pool.query(`SELECT id, status FROM task_executions
+    WHERE task_id = $1 AND execution_type IN ('development', 'correction')
+    ORDER BY started_at DESC, id DESC LIMIT 1`, [taskId]);
+  return result.rows[0]?.status === "passed" ? result.rows[0].id : null;
+}
+async function freshQa(task) {
+  return Boolean(task.qa_details?.sourceExecutionId) && task.qa_details.sourceExecutionId === await latestDevelopment(task.id);
+}
+async function recordQaDetails(taskId, details, executionId = null) {
+  await pool.query(`UPDATE tasks SET qa_details = $2::jsonb WHERE id = $1`, [taskId, JSON.stringify(details)]);
+  if (executionId) await pool.query(`UPDATE task_executions SET qa_details = $2::jsonb WHERE id = $1`, [executionId, JSON.stringify(details)]);
+}
+
 async function runQaAttempt({
   task,
   qaAgent,
   attemptNumber,
 }) {
+  const sourceExecutionId = await latestDevelopment(task.id);
+  const started = Date.now();
+  let developer = task.provider;
+  let reviewer = null;
   await pool.query(
     `
       UPDATE tasks
@@ -432,7 +451,9 @@ async function runQaAttempt({
   );
 
   try {
-    const { developer, reviewer } = await getCrossQaProvider(task.id);
+    ({ developer, reviewer } = await getCrossQaProvider(task.id));
+    await recordQaDetails(task.id, { classification: "inconclusive", reason: "QA en curso", sourceExecutionId,
+      developer, reviewer, attempt: attemptNumber, fallback: null, durationMs: null, tokens: null, costUsd: null });
     const providerAttempt =
       await runProviderBackedAttempt({
         taskId: task.id,
@@ -456,15 +477,32 @@ async function runQaAttempt({
               task.description,
             correctionFeedback:
               task.correction_feedback,
+            shouldContinue: async () => {
+              const state = await pool.query(`SELECT qa_stop_requested FROM tasks WHERE id = $1`, [task.id]);
+              return !state.rows[0]?.qa_stop_requested && sourceExecutionId === await latestDevelopment(task.id);
+            },
           }),
         getStatus: (qaResult) =>
           qaResult.status,
         getMetadata: (qaResult) => ({
           usage: qaResult.aiUsage,
           model: qaResult.aiModel,
+          durationMs: qaResult.durationMs,
+          costUsd: qaResult.costUsd,
+          errorMessage: qaResult.classification === "passed" ? null : qaResult.reason,
         }),
       });
     const qaResult = providerAttempt.result;
+    const control = await pool.query(`SELECT auto_correction_active, qa_stop_requested FROM tasks WHERE id = $1`, [task.id]);
+    const resolved = resolveQaClassification({ classification: qaResult.classification, sourceExecutionId,
+      latestExecutionId: await latestDevelopment(task.id), active: control.rows[0]?.auto_correction_active && !control.rows[0]?.qa_stop_requested });
+    qaResult.classification = resolved.classification;
+    if (resolved.reason) qaResult.reason = resolved.reason;
+    qaResult.status = resolved.classification === "passed" ? "passed" : "failed";
+    await recordQaDetails(task.id, { classification: qaResult.classification, reason: qaResult.reason || qaResult.summary,
+      sourceExecutionId, developer, reviewer, attempt: attemptNumber,
+      fallback: providerAttempt.fallbackEvent, durationMs: Date.now() - started,
+      tokens: qaResult.aiUsage?.totalTokens ?? null, costUsd: qaResult.costUsd ?? null }, providerAttempt.executionId);
 
     const finalSummary = [
       `QA automatico intento ${attemptNumber}`,
@@ -493,7 +531,7 @@ async function runQaAttempt({
         `,
         [
           task.id,
-          qaResult.status,
+          qaResult.classification === "passed" ? "passed" : qaResult.classification === "functional_failure" ? "failed" : "pending",
           finalSummary.slice(-15000),
         ]
       );
@@ -506,6 +544,9 @@ async function runQaAttempt({
       },
     };
   } catch (error) {
+    await recordQaDetails(task.id, { classification: error.qaClassification || "technical_error", reason: error.message,
+      sourceExecutionId, developer, reviewer, fallback: error.fallbackEvent || null, attempt: attemptNumber,
+      tokens: error.agentResult?.usage?.totalTokens ?? null, costUsd: error.agentResult?.costUsd ?? null, durationMs: Date.now() - started }, error.executionId);
     error.crossQaBlocked = true;
     throw error;
   }
@@ -516,7 +557,6 @@ async function runCorrectionAttempt({
   agent,
   qaSummary,
   attemptNumber,
-  statusBeforeCorrection,
 }) {
   const taskProvider =
     assertProviderAllowedForRole({
@@ -539,6 +579,7 @@ async function runCorrectionAttempt({
   );
 
   try {
+    const beforeFingerprint = await worktreeFingerprint(task.worktree_path);
     const correctionPrompt = buildCorrectionPrompt({
       agent,
       task,
@@ -575,7 +616,7 @@ async function runCorrectionAttempt({
             correctionGitStatus: gitStatus,
             correctionLeftChanges:
               Boolean(gitStatus) &&
-              gitStatus !== statusBeforeCorrection,
+              (await worktreeFingerprint(task.worktree_path)) !== beforeFingerprint,
           };
         },
         getStatus: (result) =>
@@ -596,6 +637,7 @@ async function runCorrectionAttempt({
       correctionResult.correctionGitStatus;
     const leftChanges =
       correctionResult.correctionLeftChanges;
+    if (!leftChanges) await recordQaDetails(task.id, { ...task.qa_details, classification: "inconclusive", reason: "La correccion no dejo cambios; ciclo detenido sin consumir intentos" });
     const noChangesErrorMessage =
       "La correccion automatica finalizo sin dejar cambios en el worktree.";
 
@@ -640,7 +682,7 @@ async function runCorrectionAttempt({
           qaSummary.slice(-15000),
           correctionSummary.slice(-15000),
           leftChanges ? "pending" : "failed",
-          leftChanges ? 1 : 0,
+          correctionOutcome(leftChanges).consumed,
         ]
       );
 
@@ -650,6 +692,7 @@ async function runCorrectionAttempt({
       leftChanges,
     };
   } catch (error) {
+    await recordQaDetails(task.id, { ...task.qa_details, classification: "technical_error", reason: error.message }, error.executionId);
     throw error;
   }
 }
@@ -1297,6 +1340,16 @@ REGLAS OBLIGATORIAS:
 
 // Explicit authorization for non-independent QA. A successful result can be
 // approved only by a second, explicit human confirmation at /:id/approve.
+router.post("/:id/qa/stop", async (req, res, next) => {
+  try {
+    const result = await pool.query(`UPDATE tasks SET qa_stop_requested = TRUE,
+      qa_details = COALESCE(qa_details, '{}'::jsonb) || '{"classification":"inconclusive","reason":"Ciclo detenido por el usuario"}'::jsonb,
+      updated_at = NOW() WHERE id = $1 AND auto_correction_active = TRUE RETURNING *`, [req.params.id]);
+    if (!result.rows[0]) return res.status(409).json({ message: "La tarea no tiene un ciclo automatico activo" });
+    res.json(result.rows[0]);
+  } catch (error) { next(error); }
+});
+
 router.post("/:id/qa/authorize-fallback", async (req, res) => {
   if (req.body?.authorize !== true) {
     return res.status(400).json({ message: "Se requiere autorizacion explicita del usuario." });
@@ -1324,7 +1377,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
       return res.status(409).json({ message: "No hay un bloqueo de proveedor QA cruzado que habilite esta excepcion." });
     }
     const lock = await pool.query(
-      `UPDATE tasks SET auto_correction_active = TRUE, auto_correction_stage = 'qa',
+      `UPDATE tasks SET auto_correction_active = TRUE, qa_stop_requested = FALSE, auto_correction_stage = 'qa',
        qa_status = 'running', updated_at = NOW()
        WHERE id = $1 AND auto_correction_active = FALSE AND qa_status = 'pending'
        RETURNING id`, [task.id]
@@ -1335,6 +1388,8 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
       `SELECT id FROM agents WHERE role = 'qa' AND active = TRUE LIMIT 1`
     );
     if (!agent.rows.length) throw new Error("No existe un QA Agent activo");
+    const sourceExecutionId = await latestDevelopment(task.id);
+    const started = Date.now();
     const attempt = await runProviderBackedAttempt({
       taskId: task.id,
       agentId: agent.rows[0].id,
@@ -1351,10 +1406,21 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
         taskTitle: task.title,
         taskDescription: task.description,
         correctionFeedback: task.correction_feedback,
+        shouldContinue: async () => {
+          const state = await pool.query(`SELECT qa_stop_requested FROM tasks WHERE id = $1`, [task.id]);
+          return !state.rows[0]?.qa_stop_requested && sourceExecutionId === await latestDevelopment(task.id);
+        },
       }),
       getStatus: (result) => result.status,
       getMetadata: (result) => ({ usage: result.aiUsage, model: result.aiModel }),
     });
+    const control = await pool.query(`SELECT auto_correction_active, qa_stop_requested FROM tasks WHERE id = $1`, [task.id]);
+    const resolved = resolveQaClassification({ classification: attempt.result.classification, sourceExecutionId,
+      latestExecutionId: await latestDevelopment(task.id), active: control.rows[0]?.auto_correction_active && !control.rows[0]?.qa_stop_requested });
+    if (resolved.classification !== "passed") attempt.result.status = "failed";
+    await recordQaDetails(task.id, { ...resolved, reason: resolved.reason || attempt.result.reason || attempt.result.summary,
+      sourceExecutionId, developer, reviewer: developer, fallback: { status: "autorizado", originalProvider: reviewer, alternativeProvider: developer },
+      attempt: 1, durationMs: Date.now() - started, tokens: attempt.result.aiUsage?.totalTokens ?? null, costUsd: attempt.result.costUsd ?? null }, attempt.executionId);
     const summary = [
       'QA ALTERNATIVO AUTORIZADO EXPLICITAMENTE POR EL USUARIO',
       `Desarrollo: ${developer}; QA alternativo: ${developer}; QA cruzado pendiente: ${reviewer}`,
@@ -1371,6 +1437,7 @@ router.post("/:id/qa/authorize-fallback", async (req, res) => {
     locked = false;
     return res.json(updated.rows[0]);
   } catch (error) {
+    await recordQaDetails(req.params.id, { classification: 'technical_error', reason: error.message }, error.executionId);
     console.error('Error en QA alternativo autorizado:', error);
     return res.status(500).json({ message: error.message });
   } finally {
@@ -1462,9 +1529,8 @@ router.post(
         `
           UPDATE tasks
           SET auto_correction_active = TRUE,
+              qa_stop_requested = FALSE,
               auto_correction_stage = 'qa',
-              auto_correction_finished_count = 0,
-              correction_attempts = 0,
               updated_at = NOW()
           WHERE id = $1
             AND auto_correction_active = FALSE
@@ -1540,6 +1606,8 @@ router.post(
         qaAttempt <= MAX_AUTOMATIC_CORRECTIONS + 1;
         qaAttempt += 1
       ) {
+        const cycleControl = await pool.query(`SELECT auto_correction_active, qa_stop_requested FROM tasks WHERE id = $1`, [currentTask.id]);
+        if (!cycleControl.rows[0]?.auto_correction_active || cycleControl.rows[0]?.qa_stop_requested) break;
         const qaAttemptResult =
           await runQaAttempt({
             task: currentTask,
@@ -1550,10 +1618,7 @@ router.post(
         currentTask = qaAttemptResult.task;
         finalTask = currentTask;
 
-        if (
-          qaAttemptResult.qaResult.status ===
-          "passed"
-        ) {
+        if (!canCorrect({ classification: qaAttemptResult.qaResult.classification, active: currentTask.auto_correction_active, consumed: Number(currentTask.correction_attempts), fresh: await freshQa(currentTask) })) {
           break;
         }
 
@@ -1633,6 +1698,8 @@ router.post(
           break;
         }
 
+        const latestControl = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [currentTask.id]);
+        if (!latestControl.rows[0]?.auto_correction_active || latestControl.rows[0]?.qa_stop_requested || !await freshQa(currentTask)) break;
         const correctionAttempt =
           Number(currentTask.correction_attempts) +
           1;
@@ -1643,10 +1710,6 @@ router.post(
             qaSummary:
               qaAttemptResult.qaResult.summary,
             attemptNumber: correctionAttempt,
-            statusBeforeCorrection:
-              await getWorktreeStatus(
-                currentTask.worktree_path
-              ),
           });
 
         currentTask = correctionAttemptResult.task;
@@ -1904,6 +1967,8 @@ router.post(
           message: "Tarea no encontrada",
         });
       }
+
+      if (task.auto_correction_active) return res.status(409).json({ message: "Detene el ciclo automatico antes de iniciar una correccion manual" });
 
       if (task.status !== "review") {
         return res.status(409).json({
@@ -2231,6 +2296,8 @@ router.post(
         });
       }
 
+      if (task.auto_correction_active) return res.status(409).json({ message: "Espera a que finalice el ciclo automatico" });
+
       if (task.status !== "review") {
         return res.status(409).json({
           status: "error",
@@ -2239,6 +2306,11 @@ router.post(
         });
       }
 
+      if (!await freshQa(task)) {
+        await recordQaDetails(task.id, { ...task.qa_details, classification: "stale", reason: "QA no corresponde al ultimo desarrollo" });
+        return res.status(409).json({ message: "QA desactualizado: ejecuta QA nuevamente" });
+      }
+      if (task.qa_details?.classification !== "passed") return res.status(409).json({ message: "La clasificacion QA no habilita aprobacion" });
       // A non-independent QA result is never silently treated as cross-provider QA.
       // The server verifies the recorded authorization and successful execution,
       // then requires a second, explicit approval confirmation.

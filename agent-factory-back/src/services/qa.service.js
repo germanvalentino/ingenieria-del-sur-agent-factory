@@ -1,3 +1,4 @@
+import { classifyVerdict, classifyCommandFailure, isText, reviewChunks, worktreeFingerprint } from "./qa-cycle.service.js";
 import {
   execFile,
   spawn,
@@ -19,6 +20,8 @@ const NODE_SYNTAX_EXTENSIONS = new Set([
 const EXCLUDED_CHECK_DIRECTORIES = new Set([
   "node_modules",
   "dist",
+  "build",
+  ".git",
 ]);
 const EXCLUDED_REVIEW_DIRECTORIES = new Set([
   "node_modules",
@@ -101,6 +104,7 @@ async function executeNpmScript({
     return {
       script,
       status: "failed",
+      technicalError: Boolean(error.killed || error.signal || typeof error.code !== "number"),
       output: [
         error.stdout,
         error.stderr,
@@ -150,6 +154,7 @@ async function executeNpmCi(workingDirectory) {
     return {
       script: "npm ci",
       status: "failed",
+      technicalError: Boolean(error.killed || error.signal || typeof error.code !== "number"),
       output: [
         error.stdout,
         error.stderr,
@@ -232,6 +237,7 @@ function runNodeCheck(filePath, cwd) {
     child.on("error", (error) => {
       resolve({
         status: "failed",
+        technicalError: true,
         output: error.message,
       });
     });
@@ -285,6 +291,7 @@ async function executeNodeSyntaxCheck(
       return {
         script: "node --check",
         status: "failed",
+        technicalError: result.technicalError,
         output: [
           `Archivo: ${relativeFile}`,
           result.output,
@@ -327,12 +334,10 @@ async function ensureDependencies(
     "package-lock.json"
   );
 
+  if (await pathExists(nodeModulesPath)) return null;
+
   if (await pathExists(packageLockPath)) {
     return executeNpmCi(workingDirectory);
-  }
-
-  if (await pathExists(nodeModulesPath)) {
-    return null;
   }
 
   return {
@@ -430,13 +435,14 @@ async function getGitStatusSnapshot(
 async function assertGitStatusUnchanged({
   workingDirectory,
   beforeStatus,
+  beforeFingerprint,
 }) {
   const afterStatus =
     await getGitStatusSnapshot(
       workingDirectory
     );
 
-  if (afterStatus !== beforeStatus) {
+  if (afterStatus !== beforeStatus || (beforeFingerprint && beforeFingerprint !== await worktreeFingerprint(workingDirectory))) {
     throw new Error(
       [
         "QA modificÃ³ el estado Git del worktree durante la validaciÃ³n.",
@@ -612,11 +618,12 @@ async function executeLintWithBaseline({
   });
 }
 
-function shouldIncludeReviewFile(gitPath) {
+export function shouldIncludeReviewFile(gitPath) {
   const normalized = normalizeGitPath(gitPath);
   const parts = normalized.split("/");
   const filename =
     parts.at(-1)?.toLowerCase() || "";
+  if (filename === "package-lock.json") return false;
 
   if (
     EXCLUDED_REVIEW_FILENAMES.has(filename) ||
@@ -677,6 +684,12 @@ async function getReviewDiff({
     return "";
   }
 
+  const textPaths = [];
+  for (const file of reviewablePaths) {
+    try { if (isText(await fs.readFile(path.join(workingDirectory, file)))) textPaths.push(file); }
+    catch (error) { if (error.code === "ENOENT") textPaths.push(file); else throw error; }
+  }
+  if (!textPaths.length) return "";
   return runGit(
     [
       "diff",
@@ -684,7 +697,7 @@ async function getReviewDiff({
       "--no-ext-diff",
       "--unified=60",
       "--",
-      ...reviewablePaths,
+      ...textPaths,
     ],
     workingDirectory
   );
@@ -712,10 +725,8 @@ function formatAddedFileDiff({
 async function buildUntrackedFilesDiff({
   workingDirectory,
   untrackedPaths,
-  remainingSize,
 }) {
   const diffs = [];
-  let usedSize = 0;
 
   for (const gitPath of untrackedPaths) {
     if (!shouldIncludeReviewFile(gitPath)) {
@@ -732,22 +743,13 @@ async function buildUntrackedFilesDiff({
       continue;
     }
 
-    const content = await fs.readFile(
-      absolutePath,
-      "utf8"
-    );
+    const bytes = await fs.readFile(absolutePath);
+    if (!isText(bytes)) continue;
+    const content = bytes.toString("utf8");
     const diff = formatAddedFileDiff({
       gitPath,
       content,
     });
-
-    usedSize += diff.length;
-
-    if (usedSize > remainingSize) {
-      throw new Error(
-        `El diff es demasiado grande para una sola revisiÃ³n QA: supera ${remainingSize} caracteres al incorporar archivos nuevos`
-      );
-    }
 
     diffs.push(diff);
   }
@@ -762,7 +764,6 @@ async function getGitChanges(
    * Hace visibles en git diff también los archivos
    * nuevos, sin agregarlos realmente al commit.
    */
-  const MAX_DIFF_SIZE = 500000;
   const repositoryRoot = validateDirectory(
     await runGit(
       ["rev-parse", "--show-toplevel"],
@@ -828,8 +829,6 @@ async function getGitChanges(
       untrackedPaths: getReviewableGitPaths(
         untrackedResult.split(/\r?\n/)
       ),
-      remainingSize:
-        MAX_DIFF_SIZE - trackedDiff.length,
     });
   const diff = [trackedDiff, untrackedDiff]
     .filter(Boolean)
@@ -837,47 +836,14 @@ async function getGitChanges(
     .trim();
 
   if (!diff) {
-    throw new Error(
-      "QA no encontró cambios para revisar"
-    );
-  }
-
-  if (diff.length > MAX_DIFF_SIZE) {
-    throw new Error(
-      `El diff es demasiado grande para una sola revisión QA: ${diff.length} caracteres`
-    );
+    const error = new Error("QA no encontro cambios textuales para revisar");
+    error.qaClassification = "inconclusive";
+    throw error;
   }
 
   return {
     status: sanitizeGitStatus(status),
     diff,
-  };
-}
-
-function parseQaVerdict(output) {
-  const matches = [
-    ...output.matchAll(
-      /\bQA_(PASS|FAIL)\b/g
-    ),
-  ];
-
-  if (matches.length === 0) {
-    return {
-      status: "failed",
-      reason:
-        "Codex no emitió QA_PASS o QA_FAIL",
-    };
-  }
-
-  const lastVerdict =
-    matches[matches.length - 1][1];
-
-  return {
-    status:
-      lastVerdict === "PASS"
-        ? "passed"
-        : "failed",
-    reason: null,
   };
 }
 
@@ -1053,20 +1019,29 @@ export async function runQaValidation({
   taskTitle,
   taskDescription,
   correctionFeedback,
+  shouldContinue = async () => true,
+  dependencies = {},
 }) {
-  const safeDirectory =
-    validateDirectory(workingDirectory);
+  const validateProject = dependencies.validateProject || runProjectValidations;
+  const readStatus = dependencies.readStatus || getGitStatusSnapshot;
+  const changedFiles = dependencies.changedFiles || getGitChangedPaths;
+  const readChanges = dependencies.readChanges || getGitChanges;
+  const review = dependencies.review || executeAgent;
+  const assertUnchanged = dependencies.assertUnchanged || assertGitStatusUnchanged;
+  const fingerprint = dependencies.fingerprint || worktreeFingerprint;
+  const safeDirectory = validateDirectory(workingDirectory);
   const initialGitStatus =
-    await getGitStatusSnapshot(
+    await readStatus(
       safeDirectory
     );
 
+  const initialFingerprint = await fingerprint(safeDirectory);
   let results = [];
   let usingNodeSyntaxCheck = false;
   let commandsSummary;
 
   if (projectDirectories?.length) {
-    const changedPaths = await getGitChangedPaths(
+    const changedPaths = await changedFiles(
       safeDirectory
     );
     const frontendProject =
@@ -1142,7 +1117,7 @@ export async function runQaValidation({
 
     for (const project of changedProjects) {
       const projectValidation =
-        await runProjectValidations({
+        await validateProject({
           workingDirectory:
             project.directory,
           baseBranch,
@@ -1172,7 +1147,7 @@ export async function runQaValidation({
       projectSummaries.join("\n\n");
   } else {
     const projectValidation =
-      await runProjectValidations({
+      await validateProject({
         workingDirectory: safeDirectory,
         baseBranch,
       });
@@ -1191,13 +1166,16 @@ export async function runQaValidation({
   );
 
   if (!commandsPassed) {
-    await assertGitStatusUnchanged({
+    await assertUnchanged({
       workingDirectory: safeDirectory,
       beforeStatus: initialGitStatus,
+      beforeFingerprint: initialFingerprint,
     });
 
     return {
       status: "failed",
+      classification: classifyCommandFailure(results.find(r => r.status === "failed"), await changedFiles(safeDirectory)),
+      reason: commandsSummary,
       summary: commandsSummary,
       results,
       codexUsage: null,
@@ -1211,8 +1189,14 @@ export async function runQaValidation({
       : "Considera que las validaciones configuradas ya finalizaron correctamente. No exijas node --check si el proyecto tiene scripts lint, test o build; node --check es solamente el fallback cuando no existe ninguno de esos scripts.";
 
   const gitChanges =
-  await getGitChanges(safeDirectory);
+  await readChanges(safeDirectory);
 
+  const chunks = reviewChunks(gitChanges.diff);
+  const reviews = [];
+  const started = Date.now();
+  let technicalError = null;
+  for (const chunk of chunks) {
+  if (!await shouldContinue()) break;
   const reviewPrompt = `
 Sos el QA Agent de Ingeniería del Sur.
 
@@ -1238,6 +1222,7 @@ Si las observaciones humanas posteriores contradicen el requerimiento original, 
 
 INSTRUCCIONES:
 - Revisá exclusivamente el STATUS y DIFF entregados dentro de este mensaje.
+- Este mensaje contiene un grupo de archivos o un segmento de un diff grande. No rechaces por contexto ausente; pedi contexto de solo lectura si resulta necesario.
 - No intentes ejecutar git diff.
 - Podés leer archivos del proyecto solamente si necesitás contexto adicional.
 - No modifiques archivos.
@@ -1256,7 +1241,7 @@ ${gitChanges.status}
 
 DIFF EXACTO DE LA TAREA:
 \`\`\`diff
-${gitChanges.diff}
+${chunk}
 \`\`\`
 
 FORMATO OBLIGATORIO:
@@ -1268,32 +1253,53 @@ HALLAZGOS:
 RIESGOS:
 `;
 
+  try {
   const agentReview =
-    await executeAgent({
+    await review({
       provider,
       workingDirectory: safeDirectory,
       prompt: reviewPrompt,
       sandbox: "read-only",
     });
 
-  const verdict = parseQaVerdict(
-    agentReview.output
-  );
+  reviews.push(agentReview);
+  } catch (error) {
+    technicalError = error.message;
+    if (error.agentResult) reviews.push(error.agentResult);
+    break;
+  }
+  }
+  const classifications = reviews.map(r => classifyVerdict(r.output));
+  const classification = technicalError ? "technical_error" : reviews.length !== chunks.length || chunks.length === 0 ? "inconclusive" : classifications.includes("inconclusive") ? "inconclusive" : classifications.includes("functional_failure") ? "functional_failure" : "passed";
+  const agentReview = { output: reviews.map((r, i) => `Grupo ${i + 1}:\n${r.output}`).join("\n\n"), model: reviews[0]?.model, usage: {}, costUsd: null };
+  for (const key of ["inputTokens", "outputTokens", "totalTokens", "cachedInputTokens"]) {
+    const values = reviews.map(r => r.usage?.[key]);
+    agentReview.usage[key] = values.every(Number.isFinite) ? values.reduce((a,b) => a+b, 0) : null;
+  }
+  if (reviews.every(r => Number.isFinite(r.costUsd))) agentReview.costUsd = reviews.reduce((sum, r) => sum + r.costUsd, 0);
+  const verdict = { status: classification === "passed" ? "passed" : "failed" };
 
   const summary = [
     commandsSummary,
+    technicalError,
     "",
     `=== REVISION DE CODIGO ${provider.toUpperCase()} ===`,
     agentReview.output,
   ].join("\n");
 
-  await assertGitStatusUnchanged({
+  await assertUnchanged({
     workingDirectory: safeDirectory,
     beforeStatus: initialGitStatus,
+    beforeFingerprint: initialFingerprint,
   });
 
   return {
     status: verdict.status,
+    classification,
+    reason: technicalError || (classification === "inconclusive" ? "Revision incompleta, detenida o sin veredicto valido" : agentReview.output),
+    durationMs: Date.now() - started,
+    costUsd: agentReview.costUsd,
+    groups: chunks.length,
     summary,
     results,
     review: agentReview.output,
