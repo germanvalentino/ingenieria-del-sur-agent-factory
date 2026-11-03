@@ -1,3 +1,4 @@
+import { inspectWorktreeDependencies } from "./worktree-dependencies.service.js";
 import { executeGit } from "./git-command.service.js";
 import { collectExecutionDiff, buildSelectiveContext, qaContextChunks, includeContextFile, contextLimits, contextError, validateQaPromptBudget } from "./selective-context.service.js";
 import { redactSecrets } from "./secret-redaction.service.js";
@@ -123,18 +124,10 @@ async function executeNpmScript({
 
 async function executeNpmCi(workingDirectory) {
   try {
-    const commandProcessor =
-      process.env.ComSpec ||
-      "C:\\Windows\\System32\\cmd.exe";
-
+    const windows = process.platform === "win32";
     const result = await execFileAsync(
-      commandProcessor,
-      [
-        "/d",
-        "/s",
-        "/c",
-        "npm.cmd ci",
-      ],
+      windows ? (process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe") : "npm",
+      windows ? ["/d", "/s", "/c", "npm.cmd ci"] : ["ci"],
       {
         cwd: workingDirectory,
         windowsHide: true,
@@ -326,19 +319,10 @@ async function pathExists(targetPath) {
   }
 }
 
-async function ensureDependencies(
-  workingDirectory
-) {
-  const nodeModulesPath = path.join(
-    workingDirectory,
-    "node_modules"
-  );
-  const packageLockPath = path.join(
-    workingDirectory,
-    "package-lock.json"
-  );
-
-  if (await pathExists(nodeModulesPath)) return null;
+async function ensureDependencies(workingDirectory) {
+  const packageLockPath = path.join(workingDirectory, "package-lock.json");
+  const inspection = await inspectWorktreeDependencies(workingDirectory);
+  if (inspection.ready) return null;
 
   if (await pathExists(packageLockPath)) {
     return executeNpmCi(workingDirectory);
@@ -347,8 +331,8 @@ async function ensureDependencies(
   return {
     script: "dependencies",
     status: "failed",
-    output:
-      "QA no puede preparar dependencias: no existe package-lock.json para ejecutar npm ci ni node_modules para continuar sin instalar.",
+    technicalError: true,
+    output: `Dependencias faltantes (${inspection.missing.join(", ")}); no existe package-lock.json para ejecutar npm ci.`,
   };
 }
 
@@ -1114,7 +1098,18 @@ export async function runQaValidation({
   }
   Object.assign(context.metrics, policyMetrics);
   if (!context.diff.trim()) throw Object.assign(new Error('QA sin cambios textuales revisables'), { qaClassification: 'inconclusive', contextMetrics: context.metrics });
-  if (context.metrics.excludedFiles.some(item => ['binary', 'non-regular'].includes(item.reason))) throw contextError('Contexto inseguro: cambios no revisables requieren revision adicional', context.metrics);
+  const unreviewableChanges = context.metrics.excludedFiles.filter(
+    item => ['binary', 'non-regular'].includes(item.reason)
+  );
+  if (unreviewableChanges.length) {
+    const details = unreviewableChanges
+      .map(item => `${item.file} (${item.reason})`)
+      .join(', ');
+    throw contextError(
+      `Contexto inseguro: cambios no revisables requieren revision adicional. Archivos: ${details}`,
+      context.metrics
+    );
+  }
   const chunks = qaContextChunks(context.diff, appliedLimits);
   const contextMetrics = { ...context.metrics, characters: 0, blocksReviewed: 0 };
   const reviews = [];
