@@ -9,7 +9,7 @@ export function contextLimits(env = process.env) {
 }
 export function includeContextFile(file, intentionalLock = false) {
   const normalized = file.replaceAll('\\', '/').toLowerCase();
-  return !normalized.split('/').some(p => ['..', 'node_modules', 'dist', 'build', 'coverage', '.git', 'tmp', 'temp', 'logs', '.cache'].includes(p) || p.startsWith('.env') || /^(?:\.?secrets?|credentials?)(?:\..*)?$/.test(p)) &&
+  return !normalized.split('/').some(p => ['..', 'node_modules', '.npm-cache', 'dist', 'build', 'coverage', '.git', 'tmp', 'temp', 'logs', '.cache'].includes(p) || p.startsWith('.env') || /^(?:\.?secrets?|credentials?)(?:\..*)?$/.test(p)) &&
     !/\.(log|tmp|bak|pem|key|p12|pfx|zip|png|jpg|jpeg|gif|ico|pdf|woff2?|exe|dll|sqlite|map)$/.test(normalized) &&
     (intentionalLock || !normalized.endsWith('package-lock.json'));
 }

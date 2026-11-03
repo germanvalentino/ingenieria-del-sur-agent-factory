@@ -24,12 +24,14 @@ const NODE_SYNTAX_EXTENSIONS = new Set([
 ]);
 const EXCLUDED_CHECK_DIRECTORIES = new Set([
   "node_modules",
+  ".npm-cache",
   "dist",
   "build",
   ".git",
 ]);
 const EXCLUDED_REVIEW_DIRECTORIES = new Set([
   "node_modules",
+  ".npm-cache",
   "dist",
   "build",
   "coverage",

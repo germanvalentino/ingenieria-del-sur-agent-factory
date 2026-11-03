@@ -141,3 +141,32 @@ test('QA rejects an oversized individual prompt before any provider review', () 
     error.contextMetrics.blockedGroup === 2 &&
     error.contextMetrics.blockedReason === 'qa_prompt_limit');
 });
+
+// npm ci may populate a local cache inside a worktree; generated cache blobs
+// must not be interpreted as source changes, even when nested in a project.
+test('npm cache is excluded without hiding genuine binary source changes', async t => {
+  for (const file of [
+    '.npm-cache/_cacache/content-v2/sha512/aa/bb',
+    'agent-factory-back/.npm-cache/_cacache/content-v2/sha512/aa/bb',
+    'FRONT/.NPM-CACHE/_cacache/index-v5/item',
+  ]) assert.equal(includeContextFile(file), false, file);
+  assert.equal(includeContextFile('src/actual-binary.dat'), true);
+
+  const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-npm-cache-'));
+  t.after(() => fs.rm(repo, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+  git('init', '-q');
+  git('config', 'user.email', 'qa@example.invalid');
+  git('config', 'user.name', 'QA Test');
+  await fs.writeFile(path.join(repo, 'app.js'), 'export const value = 1;\n');
+  git('add', 'app.js');
+  git('commit', '-qm', 'baseline');
+  await fs.writeFile(path.join(repo, 'app.js'), 'export const value = 2;\n');
+  await fs.mkdir(path.join(repo, '.npm-cache', '_cacache'), { recursive: true });
+  await fs.writeFile(path.join(repo, '.npm-cache', '_cacache', 'blob'), Buffer.from([0, 255, 1]));
+  const result = await collectExecutionDiff(repo);
+  assert.match(result.diff, /app\.js/);
+  assert.doesNotMatch(result.diff, /npm-cache/);
+  assert.equal(result.excluded.some(item => item.reason === 'binary'), false);
+  assert.ok(result.excluded.some(item => item.file.includes('.npm-cache') && item.reason === 'policy'));
+});
